@@ -14,3 +14,4 @@ flair==0.6.1
 stanza
 conllu
 protobuf==3.20.*
+tensorboard==2.11.0

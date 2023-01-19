@@ -7,7 +7,6 @@ import random
 import re
 import argparse
 
-
 from flair.data import Dictionary, Sentence
 from lib.dropout import WordDropout,LockedDropout
 from transformers import BertModel,BertTokenizerFast,BertConfig
@@ -17,8 +16,7 @@ from lib.crfutils.crf import CRF
 from lib.crfutils.viterbi import ViterbiDecoder,ViterbiLoss
 from lib.reorder_sgml import reorder
 from lib.tt2conll import conllize
-
-from time import time
+from lib.attention.attentionmodule import LSTMAttention
 
 #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -33,7 +31,6 @@ class Score:
             self.f1 = 2 * correct / (system_total + gold_total) if system_total + gold_total else 0.0
             self.aligned_accuracy = correct / aligned_total if aligned_total else aligned_total
 
-
 class UDSpan:
     def __init__(self, start, end):
         self.start = start
@@ -41,10 +38,13 @@ class UDSpan:
         # so we can use characters[start:end] or range(start, end).
         self.end = end
 
-
 class MTLModel(nn.Module):
     def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False):
         super(MTLModel,self).__init__()
+
+        self.copy = False
+        self.use_pos = False
+        self.edit = False
 
         if cpu == False:
             self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -62,6 +62,18 @@ class MTLModel(nn.Module):
             self.postagsetcrf.add_item(key.strip())
         self.postagsetcrf.add_item("<START>")
         self.postagsetcrf.add_item("<STOP>")
+
+        # load char dictionary - this is already pre-sorted in the file
+        # for lemmatization
+        self.chartoidx = {}
+        with open('../data/char_vocab.txt','r') as ch:
+            charvocab = ch.readlines()
+            charvocab = [c.strip() for c in charvocab]
+            charvocab = ['<PAD>','<UNK>','<SOS>','<EOS>','<LC>','<RC>'] + charvocab
+
+        for index, val in enumerate(charvocab):
+            self.chartoidx[val] = index
+        self.idxtochar = {v:k for k,v in self.chartoidx.items()}
 
         # FEATS dictionary
         # IMPORTANT: This should be sorted by key
@@ -81,8 +93,17 @@ class MTLModel(nn.Module):
         self.embeddingdim = 768
         self.lastn = 4
 
+        # character embeddings for lemmatization
+        self.charembedding = nn.Embedding(len(self.chartoidx.keys()),100,padding_idx=self.chartoidx['<PAD>']) # TODO: parameterize embedding
+        self.char_emb_drop = nn.Dropout(p=0.1) # TODO: parameterize
+
+        # param init
+        self.charembedding.weight.data.uniform_(-1.0,1.0)
+        self.charembedding.weight.requires_grad = True
+
+        # Freeze AlephBERT here - if you like
         for param in self.model.base_model.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
         # Bi-LSTM Encoder for SBD
         self.sbdrnndim = sbdrnndim
@@ -98,6 +119,39 @@ class MTLModel(nn.Module):
         self.morphrnndim = morphrnndim
         self.morphrnnnumlayers = morphrnnnumlayers
         self.morphrnnbidirectional = morphrnnbidirectional
+
+        # encoder for character lemmatization
+        self.lemmaencoder = nn.LSTM(input_size=100,hidden_size=100,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
+        for name, param in self.lemmaencoder.named_parameters():
+            try:
+                if 'bias' in name:
+                    nn.init.constant_(param,0.0)
+                elif 'weight' in name:
+                    nn.init.xavier_uniform_(param)
+            except ValueError as ex:
+                nn.init.constant_(param,0.0)
+
+        # decoder for character lemmatization - with attention
+        self.lemmadecoder = LSTMAttention(input_size=100,hidden_size=100,batch_first=True) # TODO: parameterize
+        self.dectovocab = nn.Linear(100,len(self.chartoidx.keys())) # TODO: parameterize
+
+        for name, param in self.lemmadecoder.named_parameters():
+            try:
+                if 'bias' in name:
+                    nn.init.constant_(param,0.0)
+                elif 'weight' in name:
+                    nn.init.xavier_uniform_(param)
+            except ValueError as ex:
+                nn.init.constant_(param,0.0)
+
+        for name, param in self.dectovocab.named_parameters():
+            try:
+                if 'bias' in name:
+                    nn.init.constant_(param,0.0)
+                elif 'weight' in name:
+                    nn.init.xavier_uniform_(param)
+            except ValueError as ex:
+                nn.init.constant_(param,0.0)
 
         if sbdencodertype == 'lstm':
             self.sbdencoder = nn.LSTM(input_size=self.embeddingdim, hidden_size=self.sbdrnndim // 2,
@@ -310,6 +364,94 @@ class MTLModel(nn.Module):
 
         return spans,labelspans,final_mapping
 
+
+    def zero_state(self, inputs):
+        batch_size = inputs.size(0)
+        h0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 100, requires_grad=False) # TODO: parameterize
+        c0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 100, requires_grad=False)
+
+        return h0.cuda(), c0.cuda()
+
+    def lemmaencode(self, enc_inputs, lengths):
+        """ Encode source sequence. """
+        h0, c0 = self.zero_state(enc_inputs)
+
+        packed_inputs = nn.utils.rnn.pack_padded_sequence(enc_inputs, lengths, batch_first=True)
+        packed_h_in, (hn, cn) = self.lemmaencoder(packed_inputs, (h0, c0))
+        h_in, _ = nn.utils.rnn.pad_packed_sequence(packed_h_in, batch_first=True)
+        hn = torch.cat((hn[-1], hn[-2]), 1)
+        cn = torch.cat((cn[-1], cn[-2]), 1)
+        return h_in, (hn, cn)
+
+    def lemmadecode(self, dec_inputs, hn, cn, ctx, ctx_mask=None, src=None):
+        """ Decode a step, based on context encoding and source context states."""
+        dec_hidden = (hn, cn)
+        decoder_output = self.lemmadecoder(dec_inputs, dec_hidden, ctx, ctx_mask, return_logattn=self.copy)
+        if self.copy == True:
+            h_out, dec_hidden, log_attn = decoder_output
+        else:
+            h_out, dec_hidden = decoder_output
+
+        h_out_reshape = h_out.contiguous().view(h_out.size(0) * h_out.size(1), -1)
+        decoder_logits = self.dec2vocab(h_out_reshape)
+        decoder_logits = decoder_logits.view(h_out.size(0), h_out.size(1), -1)
+        log_probs = self.get_log_prob(decoder_logits)
+
+        if self.copy == True:
+            copy_logit = self.copy_gate(h_out)
+            if self.use_pos:
+                # can't copy the UPOS
+                log_attn = log_attn[:, :, 1:]
+
+            # renormalize
+            log_attn = torch.log_softmax(log_attn, -1)
+            # calculate copy probability for each word in the vocab
+            log_copy_prob = torch.nn.functional.logsigmoid(copy_logit) + log_attn
+            # scatter logsumexp
+            mx = log_copy_prob.max(-1, keepdim=True)[0]
+            log_copy_prob = log_copy_prob - mx
+            copy_prob = torch.exp(log_copy_prob)
+            copied_vocab_prob = log_probs.new_zeros(log_probs.size()).scatter_add(-1,
+                                                                                  src.unsqueeze(1).expand(src.size(0),
+                                                                                                          copy_prob.size(
+                                                                                                              1),
+                                                                                                          src.size(1)),
+                                                                                  copy_prob)
+            zero_mask = (copied_vocab_prob == 0)
+            log_copied_vocab_prob = torch.log(copied_vocab_prob.masked_fill(zero_mask, 1e-12)) + mx
+            log_copied_vocab_prob = log_copied_vocab_prob.masked_fill(zero_mask, -1e12)
+
+            # combine with normal vocab probability
+            log_nocopy_prob = -torch.log(1 + torch.exp(copy_logit))
+            log_probs = log_probs + log_nocopy_prob
+            log_probs = torch.logsumexp(torch.stack([log_copied_vocab_prob, log_probs]), 0)
+
+        return log_probs, dec_hidden
+
+    def lemmaforward(self, src, src_mask, tgt_in, pos=None):
+        # prepare for encoder/decoder
+        batch_size = src.size(0)
+        enc_inputs = self.char_emb_drop(self.charembedding(src))
+        dec_inputs = self.char_emb_drop(self.charembedding(tgt_in))
+        if self.use_pos:
+            assert pos is not None, "Missing POS input for seq2seq lemmatizer."
+            pos_inputs = self.pos_drop(self.pos_embedding(pos))
+            enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
+            pos_src_mask = src_mask.new_zeros([batch_size, 1])
+            src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
+        src_lens = list(src_mask.data.eq(0).long().sum(1))
+
+        h_in, (hn, cn) = self.lemmaencode(enc_inputs, src_lens)
+
+        if self.edit:
+            edit_logits = self.edit_clf(hn)
+        else:
+            edit_logits = None
+
+        log_probs, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=src)
+
+        return log_probs, edit_logits
+
     def forward(self,data,mode='train'):
 
         badrecords = [] # stores records where AlephBERT's tokenization 'messed up' the sentence's sequence length, and removes these sentences from the batch.
@@ -333,7 +475,7 @@ class MTLModel(nn.Module):
                     record.append(temp)
 
                     tempfeats = [0] * len(self.featstagset)
-                    fts = s.split('\t')[-1].strip()
+                    fts = s.split('\t')[4].strip()
                     if fts != '':
                         fts = fts.split('|')
                         for f in fts:
@@ -353,6 +495,77 @@ class MTLModel(nn.Module):
                 supertokenlabels.append(record)
                 featslabels.append(featsrecord)
 
+            # for the lemma, its hard to use all the data. So sample a couple of records instead and store the index , which is used later to retrieve POS / morph tags / etc from data
+            # need to experiment with suitable threshold for k
+            lemmabatchidxs = random.sample(range(len(data)),k=2) # two records. TODO configureable
+            lemmadata = [data[i] for i in lemmabatchidxs]
+
+            # now prepare data for character encoder
+            lemmaarr = []
+            lemmatgtoutarr = []
+            lemmatgtinarr = []
+            maxlen = float('-inf') # because we want to pad across the Entire batch, not just individual row
+            maxlentgt = float('-inf')
+
+            # these are already flattened out
+            srclengths = []
+            tgtlengths = []
+
+            for row in lemmadata:
+                src = []
+                tgtout = []
+                tgtin = []
+                for x in range(0,len(row)):
+                    srctxt = row[x].split('\t')[5].strip().lower() # TODO: experiment with different left/right contexts?
+                    tgtouttxt = list(row[x].split('\t')[6].strip().lower()) + ['<EOS>']
+                    tgtintxt = ['<SOS>'] + list(row[x].split('\t')[6].strip().lower())
+
+                    if x == 0: # no leftward context, just 1 rightward
+                        srctxt = ['<SOS>'] + ['<LC>'] + list(srctxt) + ['<RC>'] + list(row[x+1].split('\t')[5].strip().lower()) + ['<EOS>']
+                    elif x == len(row) - 1: # no rightward context, just leftward
+                        srctxt = ['<SOS>'] + list(row[x-1].split('\t')[5].strip().lower()) + ['<LC>'] + list(srctxt) + ['<RC>'] + ['<EOS>']
+                    else: # both left and right context
+                        srctxt = ['<SOS>'] + list(row[x - 1].split('\t')[5].strip().lower()) + ['<LC>'] + list(srctxt) + ['<RC>'] + list(row[x+1].split('\t')[5].strip().lower()) + ['<EOS>']
+
+
+                    srctxt  = [self.chartoidx[s] for s in srctxt] # convert to index mapping
+                    if len(srctxt) > maxlen:
+                        maxlen = len(srctxt)
+                    srclengths.append(len(srctxt))
+                    src.append(srctxt)
+
+                    tgtouttxt = [self.chartoidx[s] for s in tgtouttxt]
+                    tgtintxt = [self.chartoidx[s] for s in tgtintxt]
+
+                    if len(tgtintxt) > maxlentgt:
+                        maxlentgt = len(tgtintxt)
+
+                    tgtlengths.append(len(tgtintxt))
+                    tgtout.append(tgtouttxt)
+                    tgtin.append(tgtintxt)
+
+                assert len(src) == self.sequence_length # simple check
+                assert len(tgtout) == self.sequence_length
+                assert len(tgtin) == self.sequence_length
+                lemmaarr.append(src)
+                lemmatgtinarr.append(tgtin)
+                lemmatgtoutarr.append(tgtout)
+
+
+            # now add the padding to all src and tgt
+            for row in lemmaarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlen - len(r)))
+
+            for row in lemmatgtoutarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlentgt - len(r)))
+
+            for row in lemmatgtinarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlentgt - len(r)))
+
+
         elif mode == 'dev': # inference is on a single record
             sentences = [' '.join([s.split('\t')[0].strip() for s in data])]
             sbdlabels = [self.sbd_tag2idx[s.split('\t')[2].strip()] for s in data]
@@ -366,7 +579,7 @@ class MTLModel(nn.Module):
                 supertokenlabels.append(temp)
 
                 tempfeats = [0] * len(self.featstagset)
-                fts = s.split('\t')[-1].strip()
+                fts = s.split('\t')[4].strip()
                 if fts != '':
                     fts = fts.split('|')
                     for f in fts:
@@ -602,8 +815,8 @@ class Tagger():
 
             self.writer = SummaryWriter('../data/tensorboarddir/')
 
-            self.trainingdatafile = '../data/sentsplit_postag_train_gold.tab'
-            self.devdatafile = '../data/sentsplit_postag_dev_gold.tab'
+            self.trainingdatafile = '../data/mtldatafile_train.tab'
+            self.devdatafile = '../data/mtldatafile_dev.tab'
 
             self.bestmodel = bestmodelpath + datatype + '_best_mtlmodel.pt'
 
@@ -1071,18 +1284,29 @@ class Tagger():
                             feats = ''
 
                         if sent[i]['id'] == 1:
-                            tr.write(sent[i]['form'] + '\t' + sent[i]['upos'] + '\t' + 'B-SENT' + '\t' + supertoken + '\t' + feats + '\n')
-
+                            tr.write(sent[i]['form'] + '\t' + sent[i]['upos'] + '\t' + 'B-SENT' + '\t' + supertoken + '\t' + feats + '\t' + sent[i]['form'] + '\t' + sent[i]['lemma'] + '\n')
+                            charvocab.update(list(sent[i]['form']))
+                            charvocab.update(list(sent[i]['lemma']))
                         else:
-                            tr.write(sent[i]['form'] + '\t' + sent[i]['upos'] + '\t' + 'O' + '\t' + supertoken + '\t' + feats + '\n')
+                            tr.write(sent[i]['form'] + '\t' + sent[i]['upos'] + '\t' + 'O' + '\t' + supertoken + '\t' + feats + '\t' + sent[i]['form'] + '\t' + sent[i]['lemma'] + '\n')
+                            charvocab.update(list(sent[i]['form']))
+                            charvocab.update(list(sent[i]['lemma']))
 
                         i += 1
+
+        charvocab = set() # to store the character vocab for seq2seq lemmatization
 
         traindata = self.read_conllu()
         devdata = self.read_conllu(mode='dev')
 
         write_file(self.trainingdatafile,mode='train')
         write_file(self.devdatafile,mode='dev')
+
+        #finally, dump out the character vocab for later reading
+        with open('../data/char_vocab.txt','w') as out:
+            charvocab = sorted(list(charvocab))
+            for c in charvocab:
+                out.write(c + '\n')
 
     def read_conllu(self,mode='train'):
 
@@ -1377,9 +1601,9 @@ def main(): # testing only
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--seqlen', type=int, default=256)
+    parser.add_argument('--seqlen', type=int, default=64)
     parser.add_argument('--trainbatch', type=int, default=32)
-    parser.add_argument('--datatype', type=str, default='wiki')
+    parser.add_argument('--datatype', type=str, default='htb')
     parser.add_argument('--sbdrnndim', type=int, default=256)
     parser.add_argument('--posrnndim', type=int, default=512)
     parser.add_argument('--morphrnndim', type=int, default=512)
