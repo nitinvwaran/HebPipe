@@ -1,6 +1,7 @@
 import conllu
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import os
 import shutil
 import random
@@ -94,8 +95,8 @@ class MTLModel(nn.Module):
         self.lastn = 4
 
         # character embeddings for lemmatization
-        self.charembedding = nn.Embedding(len(self.chartoidx.keys()),100,padding_idx=self.chartoidx['<PAD>']) # TODO: parameterize embedding
-        self.char_emb_drop = nn.Dropout(p=0.1) # TODO: parameterize
+        self.charembedding = nn.Embedding(len(self.chartoidx.keys()),100,padding_idx=self.chartoidx['<PAD>']).to(self.device) # TODO: parameterize embedding
+        self.char_emb_drop = nn.Dropout(p=0.1).to(self.device) # TODO: parameterize
 
         # param init
         self.charembedding.weight.data.uniform_(-1.0,1.0)
@@ -132,8 +133,8 @@ class MTLModel(nn.Module):
                 nn.init.constant_(param,0.0)
 
         # decoder for character lemmatization - with attention
-        self.lemmadecoder = LSTMAttention(input_size=100,hidden_size=100,batch_first=True) # TODO: parameterize
-        self.dectovocab = nn.Linear(100,len(self.chartoidx.keys())) # TODO: parameterize
+        self.lemmadecoder = LSTMAttention(input_size=100,hidden_size=100*2,batch_first=True).to(self.device) # TODO: parameterize
+        self.dectovocab = nn.Linear(100*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
 
         for name, param in self.lemmadecoder.named_parameters():
             try:
@@ -376,12 +377,19 @@ class MTLModel(nn.Module):
         """ Encode source sequence. """
         h0, c0 = self.zero_state(enc_inputs)
 
-        packed_inputs = nn.utils.rnn.pack_padded_sequence(enc_inputs, lengths, batch_first=True)
+        packed_inputs = nn.utils.rnn.pack_padded_sequence(enc_inputs, lengths, batch_first=True,enforce_sorted=False)
         packed_h_in, (hn, cn) = self.lemmaencoder(packed_inputs, (h0, c0))
         h_in, _ = nn.utils.rnn.pad_packed_sequence(packed_h_in, batch_first=True)
         hn = torch.cat((hn[-1], hn[-2]), 1)
         cn = torch.cat((cn[-1], cn[-2]), 1)
         return h_in, (hn, cn)
+
+    def get_log_prob(self, logits):
+        logits_reshape = logits.view(-1, len(self.chartoidx.keys()))
+        log_probs = F.log_softmax(logits_reshape, dim=1)
+        if logits.dim() == 2:
+            return log_probs
+        return log_probs.view(logits.size(0), logits.size(1), logits.size(2))
 
     def lemmadecode(self, dec_inputs, hn, cn, ctx, ctx_mask=None, src=None):
         """ Decode a step, based on context encoding and source context states."""
@@ -393,7 +401,7 @@ class MTLModel(nn.Module):
             h_out, dec_hidden = decoder_output
 
         h_out_reshape = h_out.contiguous().view(h_out.size(0) * h_out.size(1), -1)
-        decoder_logits = self.dec2vocab(h_out_reshape)
+        decoder_logits = self.dectovocab(h_out_reshape)
         decoder_logits = decoder_logits.view(h_out.size(0), h_out.size(1), -1)
         log_probs = self.get_log_prob(decoder_logits)
 
@@ -428,29 +436,6 @@ class MTLModel(nn.Module):
 
         return log_probs, dec_hidden
 
-    def lemmaforward(self, src, src_mask, tgt_in, pos=None):
-        # prepare for encoder/decoder
-        batch_size = src.size(0)
-        enc_inputs = self.char_emb_drop(self.charembedding(src))
-        dec_inputs = self.char_emb_drop(self.charembedding(tgt_in))
-        if self.use_pos:
-            assert pos is not None, "Missing POS input for seq2seq lemmatizer."
-            pos_inputs = self.pos_drop(self.pos_embedding(pos))
-            enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
-            pos_src_mask = src_mask.new_zeros([batch_size, 1])
-            src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
-        src_lens = list(src_mask.data.eq(0).long().sum(1))
-
-        h_in, (hn, cn) = self.lemmaencode(enc_inputs, src_lens)
-
-        if self.edit:
-            edit_logits = self.edit_clf(hn)
-        else:
-            edit_logits = None
-
-        log_probs, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=src)
-
-        return log_probs, edit_logits
 
     def forward(self,data,mode='train'):
 
@@ -795,6 +780,46 @@ class MTLModel(nn.Module):
         else:
             sbdpreds = None
             pospreds = None
+
+
+        # lemmatization
+        srcarr = torch.LongTensor(lemmaarr)
+        srcarr = srcarr.to(self.device)
+        srcarr = torch.reshape(srcarr,(-1,srcarr.size(dim=2)))
+
+        srcmask = torch.eq(srcarr,self.chartoidx['<PAD>'])
+        srcmask = srcmask.to(self.device)
+
+        tgtinarr = torch.LongTensor(lemmatgtinarr)
+        tgtinarr = tgtinarr.to(self.device)
+        tgtinarr = torch.reshape(tgtinarr,(-1,tgtinarr.size(dim=2)))
+
+        tgtmask = torch.eq(tgtinarr,self.chartoidx['<PAD>'])
+        tgtmask = tgtmask.to(self.device)
+
+        tgtoutarr = torch.LongTensor(lemmatgtoutarr)
+        tgtoutarr = tgtoutarr.to(self.device)
+        tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
+
+        batch_size = srcarr.size(0)
+        enc_inputs = self.char_emb_drop(self.charembedding(srcarr))
+        dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
+        """
+        if self.use_pos:
+            pos_inputs = self.pos_drop(self.pos_embedding(pos))
+            enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
+            pos_src_mask = src_mask.new_zeros([batch_size, 1])
+            src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
+        """
+
+        h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
+
+        if self.edit:
+            edit_logits = self.edit_clf(hn)
+        else:
+            edit_logits = None
+
+        log_probs, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
 
         return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels # returns the logits and labels
 
