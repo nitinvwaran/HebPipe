@@ -39,6 +39,114 @@ class UDSpan:
         # so we can use characters[start:end] or range(start, end).
         self.end = end
 
+
+class Beam(object):
+    def __init__(self, size, cuda=False):
+
+        self.size = size
+        self.done = False
+
+        self.tt = torch.cuda if cuda else torch
+
+        # The score for each translation on the beam.
+        self.scores = self.tt.FloatTensor(size).zero_()
+        self.allScores = []
+
+        # The backpointers at each time-step.
+        self.prevKs = []
+
+        # The outputs at each time-step.
+        self.nextYs = [self.tt.LongTensor(size).fill_(0)] # TODO: remove hardcoding
+        self.nextYs[0][0] = 2 # TODO: remove hardcoding
+
+        # The copy indices for each time
+        self.copy = []
+
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    def get_current_state(self):
+        "Get the outputs for the current timestep."
+        return self.nextYs[-1]
+
+    def get_current_origin(self):
+        "Get the backpointers for the current timestep."
+        return self.prevKs[-1]
+
+    def advance(self, wordLk, copy_indices=None):
+        """
+        Given prob over words for every last beam `wordLk` and attention
+        `attnOut`: Compute and update the beam search.
+        Parameters:
+        * `wordLk`- probs of advancing from the last step (K x words)
+        * `copy_indices` - copy indices (K x ctx_len)
+        Returns: True if beam search is complete.
+        """
+        if self.done:
+            return True
+        numWords = wordLk.size(1)
+
+        # Sum the previous scores.
+        if len(self.prevKs) > 0:
+            beamLk = wordLk + self.scores.unsqueeze(1).expand_as(wordLk)
+        else:
+            # first step, expand from the first position
+            beamLk = wordLk[0]
+
+        flatBeamLk = beamLk.view(-1)
+
+        bestScores, bestScoresId = flatBeamLk.topk(self.size, 0, True, True)
+        self.allScores.append(self.scores)
+        self.scores = bestScores
+
+        # bestScoresId is flattened beam x word array, so calculate which
+        # word and beam each score came from
+        # bestScoreId is the integer ids, and numWords is the integer length.
+        # Need to do integer division
+        prevK = torch.trunc(torch.div(bestScoresId, numWords)).type(torch.LongTensor).to(self.device)
+        self.prevKs.append(prevK)
+        self.nextYs.append(bestScoresId - prevK * numWords)
+        if copy_indices is not None:
+            self.copy.append(copy_indices.index_select(0, prevK))
+
+        # End condition is when top-of-beam is EOS.
+        if self.nextYs[-1][0] == 3: # TODO: remove hardcoding
+            self.done = True
+            self.allScores.append(self.scores)
+
+        return self.done
+
+    def sort_best(self):
+        return torch.sort(self.scores, 0, True)
+
+    def get_best(self):
+        "Get the score of the best in the beam."
+        scores, ids = self.sortBest()
+        return scores[1], ids[1]
+
+    def get_hyp(self, k):
+        """
+        Walk back to construct the full hypothesis.
+        Parameters:
+             * `k` - the position in the beam to construct.
+         Returns: The hypothesis
+        """
+        hyp = []
+        cpy = []
+        for j in range(len(self.prevKs) - 1, -1, -1):
+            hyp.append(self.nextYs[j + 1][k])
+            if len(self.copy) > 0:
+                cpy.append(self.copy[j][k])
+            k = self.prevKs[j][k]
+
+        hyp = hyp[::-1]
+        cpy = cpy[::-1]
+        # postprocess: if cpy index is not -1, use cpy index instead of hyp word
+        for i, cidx in enumerate(cpy):
+            if cidx >= 0:
+                hyp[i] = -(cidx + 1)  # make index 1-based and flip it for token generation
+
+        return hyp
+
 class MTLModel(nn.Module):
     def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False):
         super(MTLModel,self).__init__()
@@ -67,7 +175,7 @@ class MTLModel(nn.Module):
         # load char dictionary - this is already pre-sorted in the file
         # for lemmatization
         self.chartoidx = {}
-        with open('../data/char_vocab.txt','r') as ch:
+        with open('data/char_vocab.txt','r') as ch:
             charvocab = ch.readlines()
             charvocab = [c.strip() for c in charvocab]
             charvocab = ['<PAD>','<UNK>','<SOS>','<EOS>','<LC>','<RC>'] + charvocab
@@ -100,7 +208,8 @@ class MTLModel(nn.Module):
 
         # param init
         self.charembedding.weight.data.uniform_(-1.0,1.0)
-        self.charembedding.weight.requires_grad = True
+        for param in self.charembedding.parameters():
+            param.requires_grad = True
 
         # Freeze AlephBERT here - if you like
         for param in self.model.base_model.parameters():
@@ -436,6 +545,23 @@ class MTLModel(nn.Module):
 
         return log_probs, dec_hidden
 
+    # during beam decoding
+    def update_state(self,states, idx, positions, beam_size):
+        """ Select the states according to back pointers. """
+        for e in states:
+            br, d = e.size()
+            s = e.contiguous().view(beam_size, br // beam_size, d)[:, idx]
+            s.data.copy_(s.data.index_select(0, positions))
+
+    def prune_hyp(self,hyp):
+        """
+        Prune a decoded hypothesis
+        """
+        if self.chartoidx['<EOS>'] in hyp:
+            idx = hyp.index(self.chartoidx['<EOS>'])
+            return hyp[:idx]
+        else:
+            return hyp
 
     def forward(self,data,mode='train'):
 
@@ -482,7 +608,7 @@ class MTLModel(nn.Module):
 
             # for the lemma, its hard to use all the data. So sample a couple of records instead and store the index , which is used later to retrieve POS / morph tags / etc from data
             # need to experiment with suitable threshold for k
-            lemmabatchidxs = random.sample(range(len(data)),k=2) # two records. TODO configureable
+            lemmabatchidxs = random.sample(range(len(data)),k=10) # two records. TODO configureable
             lemmadata = [data[i] for i in lemmabatchidxs]
 
             # now prepare data for character encoder
@@ -580,6 +706,73 @@ class MTLModel(nn.Module):
                                 tempfeats[self.featstagset[key + '=' + v]] = 1
 
                 featslabels.append(tempfeats)
+
+            lemmaarr = []
+            lemmatgtoutarr = []
+            lemmatgtinarr = []
+            maxlen = float('-inf')  # because we want to pad across the Entire batch, not just individual row
+            maxlentgt = float('-inf')
+
+            # these are already flattened out
+            srclengths = []
+            tgtlengths = []
+
+            for row in [data]:
+                src = []
+                tgtout = []
+                tgtin = []
+                for x in range(0, len(row)):
+                    srctxt = row[x].split('\t')[
+                        5].strip().lower()  # TODO: experiment with different left/right contexts?
+                    tgtouttxt = list(row[x].split('\t')[6].strip().lower()) + ['<EOS>']
+                    tgtintxt = ['<SOS>'] + list(row[x].split('\t')[6].strip().lower())
+
+                    if x == 0:  # no leftward context, just 1 rightward
+                        srctxt = ['<SOS>'] + ['<LC>'] + list(srctxt) + ['<RC>'] + list(
+                            row[x + 1].split('\t')[5].strip().lower()) + ['<EOS>']
+                    elif x == len(row) - 1:  # no rightward context, just leftward
+                        srctxt = ['<SOS>'] + list(row[x - 1].split('\t')[5].strip().lower()) + ['<LC>'] + list(
+                            srctxt) + ['<RC>'] + ['<EOS>']
+                    else:  # both left and right context
+                        srctxt = ['<SOS>'] + list(row[x - 1].split('\t')[5].strip().lower()) + ['<LC>'] + list(
+                            srctxt) + ['<RC>'] + list(row[x + 1].split('\t')[5].strip().lower()) + ['<EOS>']
+
+                    srctxt = [self.chartoidx[s] for s in srctxt]  # convert to index mapping
+                    if len(srctxt) > maxlen:
+                        maxlen = len(srctxt)
+                    srclengths.append(len(srctxt))
+                    src.append(srctxt)
+
+                    tgtouttxt = [self.chartoidx[s] for s in tgtouttxt]
+                    tgtintxt = [self.chartoidx[s] for s in tgtintxt]
+
+                    if len(tgtintxt) > maxlentgt:
+                        maxlentgt = len(tgtintxt)
+
+                    tgtlengths.append(len(tgtintxt))
+                    tgtout.append(tgtouttxt)
+                    tgtin.append(tgtintxt)
+
+                assert len(src) == self.sequence_length  # simple check
+                assert len(tgtout) == self.sequence_length
+                assert len(tgtin) == self.sequence_length
+                lemmaarr.append(src)
+                lemmatgtinarr.append(tgtin)
+                lemmatgtoutarr.append(tgtout)
+
+            # now add the padding to all src and tgt
+            for row in lemmaarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlen - len(r)))
+
+            for row in lemmatgtoutarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlentgt - len(r)))
+
+            for row in lemmatgtinarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlentgt - len(r)))
+
 
         else: # test - a tuple of text and supertoken labels
             sentences = [' '.join([s.split('\t')[0].strip() for s in data[0]])]
@@ -781,47 +974,123 @@ class MTLModel(nn.Module):
             sbdpreds = None
             pospreds = None
 
+        if mode == 'train':
+            # lemmatization
+            srcarr = torch.LongTensor(lemmaarr)
+            srcarr = srcarr.to(self.device)
+            srcarr = torch.reshape(srcarr,(-1,srcarr.size(dim=2)))
 
-        # lemmatization
-        srcarr = torch.LongTensor(lemmaarr)
-        srcarr = srcarr.to(self.device)
-        srcarr = torch.reshape(srcarr,(-1,srcarr.size(dim=2)))
+            srcmask = torch.eq(srcarr,self.chartoidx['<PAD>'])
+            srcmask = srcmask.to(self.device)
 
-        srcmask = torch.eq(srcarr,self.chartoidx['<PAD>'])
-        srcmask = srcmask.to(self.device)
+            tgtinarr = torch.LongTensor(lemmatgtinarr)
+            tgtinarr = tgtinarr.to(self.device)
+            tgtinarr = torch.reshape(tgtinarr,(-1,tgtinarr.size(dim=2)))
 
-        tgtinarr = torch.LongTensor(lemmatgtinarr)
-        tgtinarr = tgtinarr.to(self.device)
-        tgtinarr = torch.reshape(tgtinarr,(-1,tgtinarr.size(dim=2)))
+            #tgtmask = torch.eq(tgtinarr,self.chartoidx['<PAD>'])
+            #tgtmask = tgtmask.to(self.device)
 
-        tgtmask = torch.eq(tgtinarr,self.chartoidx['<PAD>'])
-        tgtmask = tgtmask.to(self.device)
+            tgtoutarr = torch.LongTensor(lemmatgtoutarr)
+            tgtoutarr = tgtoutarr.to(self.device)
+            tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
 
-        tgtoutarr = torch.LongTensor(lemmatgtoutarr)
-        tgtoutarr = tgtoutarr.to(self.device)
-        tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
+            #batch_size = srcarr.size(0)
+            enc_inputs = self.char_emb_drop(self.charembedding(srcarr))
+            dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
+            """
+            if self.use_pos:
+                pos_inputs = self.pos_drop(self.pos_embedding(pos))
+                enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
+                pos_src_mask = src_mask.new_zeros([batch_size, 1])
+                src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
+            """
 
-        batch_size = srcarr.size(0)
-        enc_inputs = self.char_emb_drop(self.charembedding(srcarr))
-        dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
-        """
-        if self.use_pos:
-            pos_inputs = self.pos_drop(self.pos_embedding(pos))
-            enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
-            pos_src_mask = src_mask.new_zeros([batch_size, 1])
-            src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
-        """
+            h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
 
-        h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
+            if self.edit:
+                edit_logits = self.edit_clf(hn)
+            else:
+                edit_logits = None
 
-        if self.edit:
-            edit_logits = self.edit_clf(hn)
-        else:
-            edit_logits = None
 
-        log_probs, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
+            lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
+            all_hyp = None
 
-        return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels # returns the logits and labels
+        else: # get predictions on the lemma here using beam search
+
+            srcarr = torch.LongTensor(lemmaarr)
+            srcarr = srcarr.to(self.device)
+            srcarr = torch.reshape(srcarr, (-1, srcarr.size(dim=2)))
+
+            srcmask = torch.eq(srcarr, self.chartoidx['<PAD>'])
+            srcmask = srcmask.to(self.device)
+
+            tgtoutarr = torch.LongTensor(lemmatgtoutarr)
+            tgtoutarr = tgtoutarr.to(self.device)
+            tgtoutarr = torch.reshape(tgtoutarr, (-1, tgtoutarr.size(dim=2)))
+
+            enc_inputs = self.charembedding(srcarr)
+            batch_size = enc_inputs.size(0)
+            """
+            if self.use_pos:
+                pos_inputs = self.pos_drop(self.pos_embedding(pos))
+                enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
+                pos_src_mask = src_mask.new_zeros([batch_size, 1])
+                src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
+            src_lens = list(src_mask.data.eq(constant.PAD_ID).long().sum(1))
+            """
+
+            h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
+
+            if self.edit:
+                edit_logits = self.edit_clf(hn)
+            else:
+                edit_logits = None
+
+            # (2) set up beam
+            with torch.no_grad():
+                h_in = h_in.data.repeat(3, 1, 1)  # repeat data for beam search # TODO: parameterize beam_size
+                src_mask = srcmask.repeat(3, 1)
+                # repeat decoder hidden states
+                hn = hn.data.repeat(3, 1)
+                cn = cn.data.repeat(3, 1)
+            beam = [Beam(3, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
+
+            # (3) main loop
+            for i in range(50): # TODO: max_decoder_len
+                dec_inputs = torch.stack([b.get_current_state() for b in beam]).t().contiguous().view(-1, 1)
+                dec_inputs = self.charembedding(dec_inputs)
+                lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
+                lemmalogits = lemmalogits.view(3, batch_size, -1).transpose(0, 1) \
+                    .contiguous()  # [batch, beam, V]
+
+                # advance each beam
+                done = []
+                for b in range(batch_size):
+                    is_done = beam[b].advance(lemmalogits.data[b])
+                    if is_done:
+                        done += [b]
+                    # update beam state
+                    self.update_state((hn, cn), b, beam[b].get_current_origin(), 3)
+
+                if len(done) == batch_size:
+                    break
+
+            # back trace and find hypothesis
+            all_hyp, all_scores = [], []
+            for b in range(batch_size):
+                scores, ks = beam[b].sort_best()
+                all_scores += [scores[0]]
+                k = ks[0]
+                hyp = beam[b].get_hyp(k)
+                hyp = self.prune_hyp(hyp)
+                hyp = [i.item() for i in hyp]
+                all_hyp += [hyp]
+
+            lemmalogits = None
+
+
+        return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels,lemmalogits,tgtoutarr, all_hyp # returns the logits and labels
 
 class Tagger():
     def __init__(self,trainflag=False,trainfile=None,devfile=None,testfile=None,sbdrnndim=256,sbdrnnnumlayers=1,sbdrnnbidirectional=True,sbdfflayerdim=256,posrnndim=512,posrnnnumlayers=1,posrnnbidirectional=True,posfflayerdim=512,morphrnndim=512,morphrnnnumlayers=1,morphrnnbidirectional=True,morphfflayerdim=512,morphencodertype='lstm',dropout=0.05,wordropout=0.05,lockeddropout=0.5,sbdencodertype='lstm',posencodertype='lstm',learningrate = 0.001,bestmodelpath='../data/checkpoint/',batchsize=32,sequencelength=256,datatype='htb',cpu=False):
@@ -868,14 +1137,20 @@ class Tagger():
         self.featsloss = nn.BCEWithLogitsLoss()
         self.featsloss.to(self.device)
 
+        weight = torch.ones(len(self.mtlmodel.chartoidx.keys()))
+        weight[self.mtlmodel.chartoidx['<PAD>']] = 0
+        self.lemmaloss = nn.NLLLoss(weight)
+        self.lemmaloss.to(self.device)
+
         self.optimizer = torch.optim.AdamW(list(self.mtlmodel.sbdencoder.parameters()) +  list(self.mtlmodel.sbdembedding2nn.parameters()) +
                                            list(self.mtlmodel.hidden2sbd.parameters()) + list(self.mtlmodel.posencoder.parameters()) + list(self.mtlmodel.posembedding2nn.parameters())
                                            + list(self.mtlmodel.hidden2postag.parameters()) + list(self.mtlmodel.poscrf.parameters())
                                            + list(self.mtlmodel.hidden2feats.parameters()) + list(self.mtlmodel.morphfflayer.parameters()) + list(self.mtlmodel.morphembedding2nn.parameters()) + list(self.mtlmodel.morphencoder.parameters())
-                                           + list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()), lr=learningrate)
+                                           + list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()) + list(self.mtlmodel.lemmadecoder.parameters()) +
+                                           list(self.mtlmodel.lemmaencoder.parameters()) + list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
 
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,base_lr=learningrate/10,max_lr=learningrate,step_size_up=250,cycle_momentum=False)
-        self.evalstep = 50
+        self.evalstep = 100
 
         self.sigmoidthreshold = 0.5
 
@@ -947,14 +1222,14 @@ class Tagger():
             data = [datum for datum in data if len(datum) == self.mtlmodel.sequence_length]
             self.mtlmodel.batch_size = len(data)
 
-            sbdlogits, sbdlabels, _, poslogits, poslabels, _ , featslogits, featslabels = self.mtlmodel(data)
+            sbdlogits, sbdlabels, _, poslogits, poslabels, _ , featslogits, featslabels,lemmalogits,lemmalabels, _ = self.mtlmodel(data)
 
             sbdtags = torch.LongTensor(sbdlabels).to(self.device)
             sbdlogits = sbdlogits.permute(0,2,1)
             sbdloss = self.sbdloss(sbdlogits,sbdtags)
 
             lengths = [self.mtlmodel.sequence_length] * self.mtlmodel.batch_size
-            lengths = torch.LongTensor(lengths).to(self.device)
+            lengths = torch.LongTensor(lengths).to('cpu')
             scores = (poslogits, lengths, self.mtlmodel.poscrf.transitions)
 
             # unwrap the pos tags into one long list first
@@ -965,7 +1240,9 @@ class Tagger():
             featstags = torch.FloatTensor(featslabels).to(self.device)
             featsloss = self.featsloss(featslogits,featstags)
 
-            mtlloss = posloss + sbdloss + featsloss # TODO: learnable weights?
+            lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())), lemmalabels.view(-1))
+
+            mtlloss = posloss + sbdloss + featsloss + lemmaloss # TODO: learnable weights?
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -976,6 +1253,7 @@ class Tagger():
             self.writer.add_scalar('train_pos_loss', posloss.item(), epoch)
             self.writer.add_scalar('train_sbd_loss', sbdloss.item(), epoch)
             self.writer.add_scalar('train_feats_loss', featsloss.item(), epoch)
+            self.writer.add_scalar('train_lemma_loss', lemmaloss.item(), epoch)
             self.writer.add_scalar('train_joint_loss', mtlloss.item(), epoch)
 
             """""""""""""""""""""""""""""""""""""""""""""
@@ -990,6 +1268,7 @@ class Tagger():
                     totalsbddevloss = 0
                     totalposdevloss = 0
                     totalfeatsdevloss = 0
+                    #totallemmaloss = 0
 
                     allsbdpreds = []
                     allsbdgold = []
@@ -997,6 +1276,8 @@ class Tagger():
                     allposgold = []
                     allfeatsgold = []
                     allfeatspreds = []
+                    alllemmagold = []
+                    alllemmapreds = []
 
                     # because of shingling for SBD, the dev data needs to be split in slices for inference, as GPU may run out of memory with shingles on the full token list.
                     # shingling and SBD prediction is done on the individual slice, as well as POS tag predictions and feats.
@@ -1013,9 +1294,11 @@ class Tagger():
                         goldposlabels = [s.split('\t')[1].strip() for s in slice]
                         goldposlabels = [self.mtlmodel.postagsetcrf.get_idx_for_item(s) for s in goldposlabels]
                         goldfeatslabels = [s.split('\t')[4].strip() for s in slice]
+                        goldlemmalabels = [s.split('\t')[6].strip() for s in slice]
 
-                        # RUn through the model and get the labels and logits (and preds for stepwise models)
-                        sbdlogits, sbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits, featslabels = self.mtlmodel(slice,mode='dev')
+
+                        # Run through the model and get the labels and logits (and preds for stepwise models)
+                        sbdlogits, sbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits, featslabels, lemmalogits, lemmalabels, lemmapreds = self.mtlmodel(slice,mode='dev')
 
                         # get the feats predictions
                         featspreds = self.mtlmodel.sigmoid(featslogits)
@@ -1031,7 +1314,7 @@ class Tagger():
                         postags = torch.LongTensor(poslabels)
                         postags = postags.to(self.device)
                         lengths = [self.mtlmodel.sequence_length]
-                        lengths = torch.LongTensor(lengths).to(self.device)
+                        lengths = torch.LongTensor(lengths).to('cpu') # so weird must be on CPU
                         scores = (poslogits, lengths, self.mtlmodel.poscrf.transitions)
                         posdevloss = self.postagloss(scores,postags).item()
 
@@ -1041,10 +1324,17 @@ class Tagger():
                         featstags = torch.unsqueeze(featstags,dim=0)
                         featsdevloss = self.featsloss(featslogits,featstags).item()
 
+                        # lemma loss
+                        #lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())),lemmalabels.view(-1)).item()
+
+                        lemmapreds = [[l for l in lemma if l > 5] for lemma in lemmapreds ] # get rid of the special characters
+                        lemmapreds = [''.join([self.mtlmodel.idxtochar[l] for l in lemma]) if len(lemma) > 0 else '_' for lemma in lemmapreds]
+
                         # add up the losses across the slices for the avg
                         totalsbddevloss += sbddevloss
                         totalposdevloss += posdevloss
                         totalfeatsdevloss += featsdevloss
+                        #totallemmaloss += lemmaloss
 
                         # build the feats tags for the sequence
                         featsslicepreds = []
@@ -1069,6 +1359,8 @@ class Tagger():
                         allposgold.extend(goldposlabels)
                         allfeatsgold.extend(goldfeatslabels)
                         allfeatspreds.extend(featsslicepreds)
+                        alllemmagold.extend(goldlemmalabels)
+                        alllemmapreds.extend(lemmapreds)
 
                     #print ('inference time')
                     #print (time() - start)
@@ -1097,6 +1389,9 @@ class Tagger():
                     correctfeats = sum([1 if p == g else 0 for p,g in zip(allfeatspreds,allfeatsgold)])
                     featsscores = Score(len(allfeatsgold),len(allfeatspreds),correctfeats,len(allfeatspreds))
 
+                    correctlemma = sum([1 if p == g else 0 for p,g in zip(alllemmapreds,alllemmagold)])
+                    lemmascores = Score(len(alllemmagold),len(alllemmapreds),correctlemma,len(alllemmapreds))
+
                     # Write the scores and losses to tensorboard and console
                     mtlloss = (totalsbddevloss + totalposdevloss + totalfeatsdevloss) / len(devdata)
 
@@ -1122,6 +1417,10 @@ class Tagger():
                     self.writer.add_scalar("feats_dev_precision",round(featsscores.precision,4),int(epoch / self.evalstep))
                     self.writer.add_scalar("feats_dev_recall", round(featsscores.recall, 4),int(epoch / self.evalstep))
 
+                    self.writer.add_scalar("lemma_dev_f1",round(lemmascores.f1,4),int(epoch / self.evalstep))
+                    self.writer.add_scalar("lemma_dev_precision", round(lemmascores.precision, 4), int(epoch / self.evalstep))
+                    self.writer.add_scalar("lemma_dev_recall", round(lemmascores.recall, 4),int(epoch / self.evalstep))
+
                     print ('sbd dev f1:' + str(sbdscores.f1))
                     print('sbd dev precision:' + str(sbdscores.precision))
                     print('sbd dev recall:' + str(sbdscores.recall))
@@ -1137,10 +1436,15 @@ class Tagger():
                     print('feats dev recall:' + str(featsscores.recall))
                     print('\n')
 
+                    print('lemma dev f1:' + str(lemmascores.f1))
+                    print('lemma dev precision:' + str(lemmascores.precision))
+                    print('lemma dev recall:' + str(lemmascores.recall))
+                    print('\n')
+
                     # save the best model
-                    if (sbdscores.f1 + posscores.f1 + featsscores.f1) / 3 > bestf1:
-                        bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1) / 3
-                        bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '.pt')
+                    if (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4 > bestf1:
+                        bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1) / 4
+                        bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
                         torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
 
     def inference(self,toks,sent_tag='auto',checkpointfile=None):
