@@ -610,7 +610,7 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
     bound_group_map = get_bound_group_map(tokenized) if out_mode == "conllu" else None
 
     if mtltagger:
-        tagged_conllu, tokenized, morphs, words = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile=model_dir + 'heb.sbdposmorph.pt')
+        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_4.989451_0.930185_0.980181_0.6781_0.942534.pt')
 
     if out_mode == "pipes":
         return tokenized

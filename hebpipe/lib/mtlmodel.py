@@ -722,8 +722,7 @@ class MTLModel(nn.Module):
                 tgtout = []
                 tgtin = []
                 for x in range(0, len(row)):
-                    srctxt = row[x].split('\t')[
-                        5].strip().lower()  # TODO: experiment with different left/right contexts?
+                    srctxt = row[x].split('\t')[5].strip().lower()  # TODO: experiment with different left/right contexts?
                     tgtouttxt = list(row[x].split('\t')[6].strip().lower()) + ['<EOS>']
                     tgtintxt = ['<SOS>'] + list(row[x].split('\t')[6].strip().lower())
 
@@ -776,6 +775,7 @@ class MTLModel(nn.Module):
 
         else: # test - a tuple of text and supertoken labels
             sentences = [' '.join([s.split('\t')[0].strip() for s in data[0]])]
+            tokens = [s.split('\t')[0].strip() for s in data[0]]
 
             supertokenlabels = []
             for s in data[1]:
@@ -785,6 +785,40 @@ class MTLModel(nn.Module):
 
             sbdlabels = None
             poslabels = None
+
+            lemmaarr = []
+            maxlen = float('-inf')  # because we want to pad across the Entire batch, not just individual row
+
+            # these are already flattened out
+            srclengths = []
+            for row in [tokens]:
+                src = []
+                for x in range(0, len(row)):
+                    srctxt = str(row[x]).lower()  # TODO: experiment with different left/right contexts?
+
+                    if x == 0:  # no leftward context, just 1 rightward
+                        srctxt = ['<SOS>'] + ['<LC>'] + list(srctxt) + ['<RC>'] + list(
+                            row[x + 1].lower()) + ['<EOS>']
+                    elif x == len(row) - 1:  # no rightward context, just leftward
+                        srctxt = ['<SOS>'] + list(row[x - 1].lower()) + ['<LC>'] + list(
+                            srctxt) + ['<RC>'] + ['<EOS>']
+                    else:  # both left and right context
+                        srctxt = ['<SOS>'] + list(row[x - 1].lower()) + ['<LC>'] + list(
+                            srctxt) + ['<RC>'] + list(row[x + 1].lower()) + ['<EOS>']
+
+                    srctxt = [self.chartoidx[s] if s in self.chartoidx.keys() else self.chartoidx['<UNK>'] for s in srctxt]  # convert to index mapping - with the UNK
+                    if len(srctxt) > maxlen:
+                        maxlen = len(srctxt)
+                    srclengths.append(len(srctxt))
+                    src.append(srctxt)
+
+                assert len(src) == self.sequence_length  # simple check
+                lemmaarr.append(src)
+
+            # now add the padding to all src and tgt
+            for row in lemmaarr:
+                for r in row:
+                    r.extend([self.chartoidx['<PAD>']] * (maxlen - len(r)))
 
         # Make embeddings and scalar average them across subwords, vertically.
         sentences = [d.split() for d in sentences] # for AlephBERT
@@ -1025,9 +1059,7 @@ class MTLModel(nn.Module):
             srcmask = torch.eq(srcarr, self.chartoidx['<PAD>'])
             srcmask = srcmask.to(self.device)
 
-            tgtoutarr = torch.LongTensor(lemmatgtoutarr)
-            tgtoutarr = tgtoutarr.to(self.device)
-            tgtoutarr = torch.reshape(tgtoutarr, (-1, tgtoutarr.size(dim=2)))
+            tgtoutarr = None
 
             enc_inputs = self.charembedding(srcarr)
             batch_size = enc_inputs.size(0)
@@ -1324,9 +1356,6 @@ class Tagger():
                         featstags = torch.unsqueeze(featstags,dim=0)
                         featsdevloss = self.featsloss(featslogits,featstags).item()
 
-                        # lemma loss
-                        #lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())),lemmalabels.view(-1)).item()
-
                         lemmapreds = [[l for l in lemma if l > 5] for lemma in lemmapreds ] # get rid of the special characters
                         lemmapreds = [''.join([self.mtlmodel.idxtochar[l] for l in lemma]) if len(lemma) > 0 else '_' for lemma in lemmapreds]
 
@@ -1334,7 +1363,6 @@ class Tagger():
                         totalsbddevloss += sbddevloss
                         totalposdevloss += posdevloss
                         totalfeatsdevloss += featsdevloss
-                        #totallemmaloss += lemmaloss
 
                         # build the feats tags for the sequence
                         featsslicepreds = []
@@ -1531,18 +1559,20 @@ class Tagger():
             allsbdpreds = []
             allpospreds = []
             allfeatspreds = []
+            alllemmapreds = []
 
             for slice in slices:
 
                 if len(slice[0]) != self.mtlmodel.sequence_length:  # this will happen in one case, for the last slice in the batch
                     self.mtlmodel.sequence_length = len(slice[0])
 
-                _, _, sbdpreds, _,_,pospreds, featslogits,_ = self.mtlmodel(slice, mode='test')
+                _, _, sbdpreds, _,_,pospreds, featslogits,_,_,_,lemmahypothesis = self.mtlmodel(slice, mode='test')
 
                 # get the feats predictions
                 featspreds = self.mtlmodel.sigmoid(featslogits)
                 featspreds = (featspreds > self.sigmoidthreshold).long()
                 featspreds = torch.squeeze(featspreds).tolist()
+
 
                 featsslicepreds = []
                 for preds in featspreds:
@@ -1559,10 +1589,16 @@ class Tagger():
 
                     featsslicepreds.append(featsstr)
 
+                # get lemma preds
+                lemmapreds = [[l for l in lemma if l > 5] for lemma in lemmahypothesis]  # get rid of the special characters
+                lemmapreds = [''.join([self.mtlmodel.idxtochar[l] for l in lemma]) if len(lemma) > 0 else '_' for lemma
+                              in lemmapreds]
+
                 allsbdpreds.extend(sbdpreds)
                 allpospreds.extend(pospreds)
                 allfeatspreds.extend(featsslicepreds)
                 allwords.extend([s.split('\t')[0].strip() for s in slice[0]])
+                alllemmapreds.extend(lemmapreds)
 
         allpospreds = [self.mtlmodel.postagsetcrf.get_item_for_index(p) for p in allpospreds]
 
@@ -1570,7 +1606,7 @@ class Tagger():
         if sent_tag != 'auto':
             allsbdpreds = taggedsbdpreds
 
-        return allsbdpreds,allpospreds, allfeatspreds, allwords
+        return allsbdpreds,allpospreds, allfeatspreds, allwords, alllemmapreds
 
     def prepare_data_files(self):
         """
@@ -1816,7 +1852,7 @@ class Tagger():
 
         # don't feed the sentencer our pos and lemma predictions, if we have them
         no_pos_lemma = re.sub(r"([^\n\t]*?)\t[^\n\t]*?\t[^\n\t]*?\n", r"\1\n", xml_data)
-        split_indices, pos_tags, morphs, words = self.inference(no_pos_lemma,sent_tag=sent_tag,checkpointfile=checkpointfile)
+        split_indices, pos_tags, morphs, words,lemmas = self.inference(no_pos_lemma,sent_tag=sent_tag,checkpointfile=checkpointfile)
 
         # for xml
         counter = 0
@@ -1908,7 +1944,7 @@ class Tagger():
 
         morphs = [m if m != '' else '_' for m in morphs]
 
-        return "\n".join(output), lines, morphs, words
+        return "\n".join(output), lines, morphs, words, lemmas
 
     def spans_score(self, gold_spans, system_spans):
         correct, gi, si = 0, 0, 0
