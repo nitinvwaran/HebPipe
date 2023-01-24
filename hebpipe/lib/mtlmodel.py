@@ -148,7 +148,7 @@ class Beam(object):
         return hyp
 
 class MTLModel(nn.Module):
-    def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False):
+    def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False,lemmadict='..data/char_vocab.txt'):
         super(MTLModel,self).__init__()
 
         self.copy = False
@@ -175,7 +175,7 @@ class MTLModel(nn.Module):
         # load char dictionary - this is already pre-sorted in the file
         # for lemmatization
         self.chartoidx = {}
-        with open('data/char_vocab.txt','r') as ch:
+        with open(lemmadict,'r') as ch:
             charvocab = ch.readlines()
             charvocab = [c.strip() for c in charvocab]
             charvocab = ['<PAD>','<UNK>','<SOS>','<EOS>','<LC>','<RC>'] + charvocab
@@ -1127,7 +1127,7 @@ class MTLModel(nn.Module):
 class Tagger():
     def __init__(self,trainflag=False,trainfile=None,devfile=None,testfile=None,sbdrnndim=256,sbdrnnnumlayers=1,sbdrnnbidirectional=True,sbdfflayerdim=256,posrnndim=512,posrnnnumlayers=1,posrnnbidirectional=True,posfflayerdim=512,morphrnndim=512,morphrnnnumlayers=1,morphrnnbidirectional=True,morphfflayerdim=512,morphencodertype='lstm',dropout=0.05,wordropout=0.05,lockeddropout=0.5,sbdencodertype='lstm',posencodertype='lstm',learningrate = 0.001,bestmodelpath='../data/checkpoint/',batchsize=32,sequencelength=256,datatype='htb',cpu=False):
 
-        self.mtlmodel = MTLModel(sbdrnndim=sbdrnndim,sbdrnnnumlayers=sbdrnnnumlayers,sbdrnnbidirectional=sbdrnnbidirectional,sbdencodertype=sbdencodertype,sbdfflayerdim=sbdfflayerdim,dropout=dropout,wordropout=wordropout,lockeddropout=lockeddropout,posrnndim=posrnndim,posrnnbidirectional=posrnnbidirectional,posencodertype=posencodertype,posrnnnumlayers=posrnnnumlayers,posfflayerdim=posfflayerdim,morphrnndim=morphrnndim,morphrnnnumlayers=morphrnnnumlayers,morphencodertype=morphencodertype,morphrnnbidirectional=morphrnnbidirectional,morphfflayerdim=morphfflayerdim,batchsize=batchsize,sequencelength=sequencelength,cpu=cpu)
+        self.mtlmodel = MTLModel(sbdrnndim=sbdrnndim,sbdrnnnumlayers=sbdrnnnumlayers,sbdrnnbidirectional=sbdrnnbidirectional,sbdencodertype=sbdencodertype,sbdfflayerdim=sbdfflayerdim,dropout=dropout,wordropout=wordropout,lockeddropout=lockeddropout,posrnndim=posrnndim,posrnnbidirectional=posrnnbidirectional,posencodertype=posencodertype,posrnnnumlayers=posrnnnumlayers,posfflayerdim=posfflayerdim,morphrnndim=morphrnndim,morphrnnnumlayers=morphrnnnumlayers,morphencodertype=morphencodertype,morphrnnbidirectional=morphrnnbidirectional,morphfflayerdim=morphfflayerdim,batchsize=batchsize,sequencelength=sequencelength,cpu=cpu,lemmadict='../data/char_vocab.txt')
 
         if trainflag == True:
 
@@ -1608,7 +1608,7 @@ class Tagger():
 
         return allsbdpreds,allpospreds, allfeatspreds, allwords, alllemmapreds
 
-    def prepare_data_files(self):
+    def prepare_data_files(self,lemmadict= '../data/char_vocab.txt'):
         """
         Prepares the train and dev data files for training
         """
@@ -1668,7 +1668,7 @@ class Tagger():
         write_file(self.devdatafile,mode='dev')
 
         #finally, dump out the character vocab for later reading
-        with open('../data/char_vocab.txt','w') as out:
+        with open(lemmadict,'w') as out:
             charvocab = sorted(list(charvocab))
             for c in charvocab:
                 out.write(c + '\n')
@@ -2012,7 +2012,7 @@ def main(): # testing only
                     dropout=args.dropout, wordropout=args.worddropout, lockeddropout=args.lockeddropout,
                     datatype=args.datatype)
 
-    tagger.prepare_data_files()
+    tagger.prepare_data_files(lemmadict='data/char_vocab.txt')
     tagger.train()
 
 
