@@ -2012,7 +2012,7 @@ def main(): # testing only
                     dropout=args.dropout, wordropout=args.worddropout, lockeddropout=args.lockeddropout,
                     datatype=args.datatype)
 
-    tagger.prepare_data_files(lemmadict='data/char_vocab.txt')
+    tagger.prepare_data_files(lemmadict='../data/char_vocab.txt')
     tagger.train()
 
 
