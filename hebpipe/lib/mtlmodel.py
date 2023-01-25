@@ -148,7 +148,7 @@ class Beam(object):
         return hyp
 
 class MTLModel(nn.Module):
-    def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False,lemmadict='..data/char_vocab.txt'):
+    def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False,lemmadict='data/char_vocab.txt'):
         super(MTLModel,self).__init__()
 
         self.copy = False
@@ -231,7 +231,7 @@ class MTLModel(nn.Module):
         self.morphrnnbidirectional = morphrnnbidirectional
 
         # encoder for character lemmatization
-        self.lemmaencoder = nn.LSTM(input_size=100,hidden_size=100,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
+        self.lemmaencoder = nn.LSTM(input_size=100 + 768,hidden_size=100,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
         for name, param in self.lemmaencoder.named_parameters():
             try:
                 if 'bias' in name:
@@ -622,10 +622,11 @@ class MTLModel(nn.Module):
             srclengths = []
             tgtlengths = []
 
-            for row in lemmadata:
+            for index, row in enumerate(lemmadata):
                 src = []
                 tgtout = []
                 tgtin = []
+
                 for x in range(0,len(row)):
                     srctxt = row[x].split('\t')[5].strip().lower() # TODO: experiment with different left/right contexts?
                     tgtouttxt = list(row[x].split('\t')[6].strip().lower()) + ['<EOS>']
@@ -1010,6 +1011,50 @@ class MTLModel(nn.Module):
 
         if mode == 'train':
             # lemmatization
+
+            # get the BERT embeddings
+            batchidxtensor = torch.LongTensor(lemmabatchidxs)
+            sampledembeddings = avgembeddings[batchidxtensor]
+
+            """
+            We do this because there is left and right character context in the src sequence
+            and we want to match the left and right word embedding to the characters of the left and right words too 
+            """
+            finalwordembeddings = []
+            for index1, row1 in enumerate(lemmaarr):
+                wordembedding = []
+                for index2,row2 in enumerate(row1):
+                    word = []
+                    lcindex = row2.index(self.chartoidx['<LC>'])
+                    rcindex = row2.index(self.chartoidx['<RC>'])
+                    if index2 == 0:
+                        for _ in range(0,rcindex + 1):
+                            word.append(sampledembeddings[index1,index2,:].tolist())
+                        for _ in range(rcindex + 1,len(row2)):
+                            word.append(sampledembeddings[index1, index2 + 1, :].tolist())
+                    elif index2 == len(row1) - 1:
+                        for _ in range(0,lcindex):
+                            word.append(sampledembeddings[index1,index2 - 1,:].tolist())
+                        for _ in range(lcindex,len(row2)):
+                            word.append(sampledembeddings[index1,index2,:].tolist())
+                    else:
+                        for _ in range(0,lcindex):
+                            word.append(sampledembeddings[index1,index2-1,:].tolist())
+                        for _ in range(lcindex,rcindex + 1):
+                            word.append(sampledembeddings[index1,index2,:].tolist())
+                        for _ in range(rcindex + 1, len(row2)):
+                            word.append(sampledembeddings[index1,index2 + 1,:].tolist())
+
+                    wordembedding.append(word)
+
+                finalwordembeddings.append(wordembedding)
+
+
+            finalwordembeddings = torch.FloatTensor(finalwordembeddings)
+            finalwordembeddings = finalwordembeddings.to(self.device)
+            finalwordembeddings = torch.reshape(finalwordembeddings, (-1, finalwordembeddings.size(dim=2),finalwordembeddings.size(dim=3)))
+
+
             srcarr = torch.LongTensor(lemmaarr)
             srcarr = srcarr.to(self.device)
             srcarr = torch.reshape(srcarr,(-1,srcarr.size(dim=2)))
@@ -1029,7 +1074,7 @@ class MTLModel(nn.Module):
             tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
 
             #batch_size = srcarr.size(0)
-            enc_inputs = self.char_emb_drop(self.charembedding(srcarr))
+            enc_inputs = self.char_emb_drop(torch.cat((self.charembedding(srcarr),finalwordembeddings),dim=2))
             dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
             """
             if self.use_pos:
@@ -1052,6 +1097,39 @@ class MTLModel(nn.Module):
 
         else: # get predictions on the lemma here using beam search
 
+            finalwordembeddings = []
+            for index1, row1 in enumerate(lemmaarr):
+                wordembedding = []
+                for index2, row2 in enumerate(row1):
+                    word = []
+                    lcindex = row2.index(self.chartoidx['<LC>'])
+                    rcindex = row2.index(self.chartoidx['<RC>'])
+                    if index2 == 0:
+                        for _ in range(0, rcindex + 1):
+                            word.append(avgembeddings[index1, index2, :].tolist())
+                        for _ in range(rcindex + 1, len(row2)):
+                            word.append(avgembeddings[index1, index2 + 1, :].tolist())
+                    elif index2 == len(row1) - 1:
+                        for _ in range(0, lcindex):
+                            word.append(avgembeddings[index1, index2 - 1, :].tolist())
+                        for _ in range(lcindex, len(row2)):
+                            word.append(avgembeddings[index1, index2, :].tolist())
+                    else:
+                        for _ in range(0, lcindex):
+                            word.append(avgembeddings[index1, index2 - 1, :].tolist())
+                        for _ in range(lcindex, rcindex + 1):
+                            word.append(avgembeddings[index1, index2, :].tolist())
+                        for _ in range(rcindex + 1, len(row2)):
+                            word.append(avgembeddings[index1, index2 + 1, :].tolist())
+
+                    wordembedding.append(word)
+
+                finalwordembeddings.append(wordembedding)
+
+            finalwordembeddings = torch.FloatTensor(finalwordembeddings)
+            finalwordembeddings = finalwordembeddings.to(self.device)
+            finalwordembeddings = torch.reshape(finalwordembeddings,(-1, finalwordembeddings.size(dim=2), finalwordembeddings.size(dim=3)))
+
             srcarr = torch.LongTensor(lemmaarr)
             srcarr = srcarr.to(self.device)
             srcarr = torch.reshape(srcarr, (-1, srcarr.size(dim=2)))
@@ -1061,7 +1139,7 @@ class MTLModel(nn.Module):
 
             tgtoutarr = None
 
-            enc_inputs = self.charembedding(srcarr)
+            enc_inputs = torch.cat((self.charembedding(srcarr),finalwordembeddings),dim=2)
             batch_size = enc_inputs.size(0)
             """
             if self.use_pos:
@@ -1125,9 +1203,9 @@ class MTLModel(nn.Module):
         return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels,lemmalogits,tgtoutarr, all_hyp # returns the logits and labels
 
 class Tagger():
-    def __init__(self,trainflag=False,trainfile=None,devfile=None,testfile=None,sbdrnndim=256,sbdrnnnumlayers=1,sbdrnnbidirectional=True,sbdfflayerdim=256,posrnndim=512,posrnnnumlayers=1,posrnnbidirectional=True,posfflayerdim=512,morphrnndim=512,morphrnnnumlayers=1,morphrnnbidirectional=True,morphfflayerdim=512,morphencodertype='lstm',dropout=0.05,wordropout=0.05,lockeddropout=0.5,sbdencodertype='lstm',posencodertype='lstm',learningrate = 0.001,bestmodelpath='../data/checkpoint/',batchsize=32,sequencelength=256,datatype='htb',cpu=False):
+    def __init__(self,trainflag=False,trainfile=None,devfile=None,testfile=None,sbdrnndim=256,sbdrnnnumlayers=1,sbdrnnbidirectional=True,sbdfflayerdim=256,posrnndim=512,posrnnnumlayers=1,posrnnbidirectional=True,posfflayerdim=512,morphrnndim=512,morphrnnnumlayers=1,morphrnnbidirectional=True,morphfflayerdim=512,morphencodertype='lstm',dropout=0.05,wordropout=0.05,lockeddropout=0.5,sbdencodertype='lstm',posencodertype='lstm',learningrate = 0.001,bestmodelpath='../data/checkpoint/',batchsize=32,sequencelength=256,datatype='htb',cpu=False,lemmadict='data/char_vocab.txt'):
 
-        self.mtlmodel = MTLModel(sbdrnndim=sbdrnndim,sbdrnnnumlayers=sbdrnnnumlayers,sbdrnnbidirectional=sbdrnnbidirectional,sbdencodertype=sbdencodertype,sbdfflayerdim=sbdfflayerdim,dropout=dropout,wordropout=wordropout,lockeddropout=lockeddropout,posrnndim=posrnndim,posrnnbidirectional=posrnnbidirectional,posencodertype=posencodertype,posrnnnumlayers=posrnnnumlayers,posfflayerdim=posfflayerdim,morphrnndim=morphrnndim,morphrnnnumlayers=morphrnnnumlayers,morphencodertype=morphencodertype,morphrnnbidirectional=morphrnnbidirectional,morphfflayerdim=morphfflayerdim,batchsize=batchsize,sequencelength=sequencelength,cpu=cpu,lemmadict='../data/char_vocab.txt')
+        self.mtlmodel = MTLModel(sbdrnndim=sbdrnndim,sbdrnnnumlayers=sbdrnnnumlayers,sbdrnnbidirectional=sbdrnnbidirectional,sbdencodertype=sbdencodertype,sbdfflayerdim=sbdfflayerdim,dropout=dropout,wordropout=wordropout,lockeddropout=lockeddropout,posrnndim=posrnndim,posrnnbidirectional=posrnnbidirectional,posencodertype=posencodertype,posrnnnumlayers=posrnnnumlayers,posfflayerdim=posfflayerdim,morphrnndim=morphrnndim,morphrnnnumlayers=morphrnnnumlayers,morphencodertype=morphencodertype,morphrnnbidirectional=morphrnnbidirectional,morphfflayerdim=morphfflayerdim,batchsize=batchsize,sequencelength=sequencelength,cpu=cpu,lemmadict=lemmadict)
 
         if trainflag == True:
 
@@ -1182,7 +1260,7 @@ class Tagger():
                                            list(self.mtlmodel.lemmaencoder.parameters()) + list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
 
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,base_lr=learningrate/10,max_lr=learningrate,step_size_up=250,cycle_momentum=False)
-        self.evalstep = 100
+        self.evalstep = 1
 
         self.sigmoidthreshold = 0.5
 
@@ -1471,7 +1549,7 @@ class Tagger():
 
                     # save the best model
                     if (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4 > bestf1:
-                        bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1) / 4
+                        bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4
                         bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
                         torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
 
@@ -2010,7 +2088,7 @@ def main(): # testing only
                     morphrnnnumlayers=args.morphrnnnumlayers,
                     learningrate=args.lr, batchsize=args.trainbatch, sequencelength=args.seqlen,
                     dropout=args.dropout, wordropout=args.worddropout, lockeddropout=args.lockeddropout,
-                    datatype=args.datatype)
+                    datatype=args.datatype,lemmadict='../data/char_vocab.txt')
 
     tagger.prepare_data_files(lemmadict='../data/char_vocab.txt')
     tagger.train()
