@@ -203,7 +203,7 @@ class MTLModel(nn.Module):
         self.lastn = 4
 
         # character embeddings for lemmatization
-        self.charembedding = nn.Embedding(len(self.chartoidx.keys()),100,padding_idx=self.chartoidx['<PAD>']).to(self.device) # TODO: parameterize embedding
+        self.charembedding = nn.Embedding(len(self.chartoidx.keys()),256,padding_idx=self.chartoidx['<PAD>']).to(self.device) # TODO: parameterize embedding
         self.char_emb_drop = nn.Dropout(p=0.1).to(self.device) # TODO: parameterize
 
         # param init
@@ -231,7 +231,7 @@ class MTLModel(nn.Module):
         self.morphrnnbidirectional = morphrnnbidirectional
 
         # encoder for character lemmatization
-        self.lemmaencoder = nn.LSTM(input_size=100 + 768,hidden_size=100,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
+        self.lemmaencoder = nn.LSTM(input_size=256 + 768 + len(self.postagsetcrf),hidden_size=256,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
         for name, param in self.lemmaencoder.named_parameters():
             try:
                 if 'bias' in name:
@@ -242,8 +242,8 @@ class MTLModel(nn.Module):
                 nn.init.constant_(param,0.0)
 
         # decoder for character lemmatization - with attention
-        self.lemmadecoder = LSTMAttention(input_size=100,hidden_size=100*2,batch_first=True).to(self.device) # TODO: parameterize
-        self.dectovocab = nn.Linear(100*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
+        self.lemmadecoder = LSTMAttention(input_size=256,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
+        self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
 
         for name, param in self.lemmadecoder.named_parameters():
             try:
@@ -477,8 +477,8 @@ class MTLModel(nn.Module):
 
     def zero_state(self, inputs):
         batch_size = inputs.size(0)
-        h0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 100, requires_grad=False) # TODO: parameterize
-        c0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 100, requires_grad=False)
+        h0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 256, requires_grad=False) # TODO: parameterize
+        c0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 256, requires_grad=False)
 
         return h0.cuda(), c0.cuda()
 
@@ -1012,47 +1012,64 @@ class MTLModel(nn.Module):
         if mode == 'train':
             # lemmatization
 
-            # get the BERT embeddings
+            # get the BERT embeddings and POS predictions
             batchidxtensor = torch.LongTensor(lemmabatchidxs)
             sampledembeddings = avgembeddings[batchidxtensor]
+            sampleposembeddings = pospredsonehot[batchidxtensor]
 
             """
             We do this because there is left and right character context in the src sequence
             and we want to match the left and right word embedding to the characters of the left and right words too 
             """
             finalwordembeddings = []
+            finalpospreds = []
             for index1, row1 in enumerate(lemmaarr):
                 wordembedding = []
+                posembedding = []
                 for index2,row2 in enumerate(row1):
                     word = []
+                    pos = []
                     lcindex = row2.index(self.chartoidx['<LC>'])
                     rcindex = row2.index(self.chartoidx['<RC>'])
                     if index2 == 0:
                         for _ in range(0,rcindex + 1):
                             word.append(sampledembeddings[index1,index2,:].tolist())
+                            pos.append(sampleposembeddings[index1,index2,:].tolist())
                         for _ in range(rcindex + 1,len(row2)):
                             word.append(sampledembeddings[index1, index2 + 1, :].tolist())
+                            pos.append(sampleposembeddings[index1, index2 + 1, :].tolist())
                     elif index2 == len(row1) - 1:
                         for _ in range(0,lcindex):
                             word.append(sampledembeddings[index1,index2 - 1,:].tolist())
+                            pos.append(sampleposembeddings[index1, index2 - 1, :].tolist())
                         for _ in range(lcindex,len(row2)):
                             word.append(sampledembeddings[index1,index2,:].tolist())
+                            pos.append(sampleposembeddings[index1, index2, :].tolist())
                     else:
                         for _ in range(0,lcindex):
                             word.append(sampledembeddings[index1,index2-1,:].tolist())
+                            pos.append(sampleposembeddings[index1, index2 - 1, :].tolist())
                         for _ in range(lcindex,rcindex + 1):
                             word.append(sampledembeddings[index1,index2,:].tolist())
+                            pos.append(sampleposembeddings[index1, index2, :].tolist())
                         for _ in range(rcindex + 1, len(row2)):
                             word.append(sampledembeddings[index1,index2 + 1,:].tolist())
+                            pos.append(sampleposembeddings[index1, index2 + 1, :].tolist())
 
                     wordembedding.append(word)
+                    posembedding.append(pos)
 
                 finalwordembeddings.append(wordembedding)
+                finalpospreds.append(posembedding)
 
 
             finalwordembeddings = torch.FloatTensor(finalwordembeddings)
             finalwordembeddings = finalwordembeddings.to(self.device)
             finalwordembeddings = torch.reshape(finalwordembeddings, (-1, finalwordembeddings.size(dim=2),finalwordembeddings.size(dim=3)))
+
+            finalpospreds = torch.FloatTensor(finalpospreds)
+            finalpospreds = finalpospreds.to(self.device)
+            finalpospreds = torch.reshape(finalpospreds, (-1, finalpospreds.size(dim=2),finalpospreds.size(dim=3)))
 
 
             srcarr = torch.LongTensor(lemmaarr)
@@ -1074,7 +1091,7 @@ class MTLModel(nn.Module):
             tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
 
             #batch_size = srcarr.size(0)
-            enc_inputs = self.char_emb_drop(torch.cat((self.charembedding(srcarr),finalwordembeddings),dim=2))
+            enc_inputs = self.char_emb_drop(torch.cat((self.charembedding(srcarr),finalwordembeddings,finalpospreds),dim=2))
             dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
             """
             if self.use_pos:
@@ -1098,37 +1115,53 @@ class MTLModel(nn.Module):
         else: # get predictions on the lemma here using beam search
 
             finalwordembeddings = []
+            finalpospreds = []
             for index1, row1 in enumerate(lemmaarr):
                 wordembedding = []
+                posembedding = []
                 for index2, row2 in enumerate(row1):
                     word = []
+                    pos = []
                     lcindex = row2.index(self.chartoidx['<LC>'])
                     rcindex = row2.index(self.chartoidx['<RC>'])
                     if index2 == 0:
                         for _ in range(0, rcindex + 1):
                             word.append(avgembeddings[index1, index2, :].tolist())
+                            pos.append(pospredsonehot[index1, index2, :].tolist())
                         for _ in range(rcindex + 1, len(row2)):
                             word.append(avgembeddings[index1, index2 + 1, :].tolist())
+                            pos.append(pospredsonehot[index1, index2 + 1, :].tolist())
                     elif index2 == len(row1) - 1:
                         for _ in range(0, lcindex):
                             word.append(avgembeddings[index1, index2 - 1, :].tolist())
+                            pos.append(pospredsonehot[index1, index2 - 1, :].tolist())
                         for _ in range(lcindex, len(row2)):
                             word.append(avgembeddings[index1, index2, :].tolist())
+                            pos.append(pospredsonehot[index1, index2, :].tolist())
                     else:
                         for _ in range(0, lcindex):
                             word.append(avgembeddings[index1, index2 - 1, :].tolist())
+                            pos.append(pospredsonehot[index1, index2 - 1, :].tolist())
                         for _ in range(lcindex, rcindex + 1):
                             word.append(avgembeddings[index1, index2, :].tolist())
+                            pos.append(pospredsonehot[index1, index2, :].tolist())
                         for _ in range(rcindex + 1, len(row2)):
                             word.append(avgembeddings[index1, index2 + 1, :].tolist())
+                            pos.append(pospredsonehot[index1, index2 + 1, :].tolist())
 
                     wordembedding.append(word)
+                    posembedding.append(pos)
 
                 finalwordembeddings.append(wordembedding)
+                finalpospreds.append(posembedding)
 
             finalwordembeddings = torch.FloatTensor(finalwordembeddings)
             finalwordembeddings = finalwordembeddings.to(self.device)
             finalwordembeddings = torch.reshape(finalwordembeddings,(-1, finalwordembeddings.size(dim=2), finalwordembeddings.size(dim=3)))
+
+            finalpospreds = torch.FloatTensor(finalpospreds)
+            finalpospreds = finalpospreds.to(self.device)
+            finalpospreds = torch.reshape(finalpospreds,(-1, finalpospreds.size(dim=2), finalpospreds.size(dim=3)))
 
             srcarr = torch.LongTensor(lemmaarr)
             srcarr = srcarr.to(self.device)
@@ -1139,7 +1172,7 @@ class MTLModel(nn.Module):
 
             tgtoutarr = None
 
-            enc_inputs = torch.cat((self.charembedding(srcarr),finalwordembeddings),dim=2)
+            enc_inputs = torch.cat((self.charembedding(srcarr),finalwordembeddings,finalpospreds),dim=2)
             batch_size = enc_inputs.size(0)
             """
             if self.use_pos:
@@ -1159,19 +1192,19 @@ class MTLModel(nn.Module):
 
             # (2) set up beam
             with torch.no_grad():
-                h_in = h_in.data.repeat(3, 1, 1)  # repeat data for beam search # TODO: parameterize beam_size
-                src_mask = srcmask.repeat(3, 1)
+                h_in = h_in.data.repeat(5, 1, 1)  # repeat data for beam search # TODO: parameterize beam_size
+                src_mask = srcmask.repeat(5, 1)
                 # repeat decoder hidden states
-                hn = hn.data.repeat(3, 1)
-                cn = cn.data.repeat(3, 1)
-            beam = [Beam(3, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
+                hn = hn.data.repeat(5, 1)
+                cn = cn.data.repeat(5, 1)
+            beam = [Beam(5, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
 
             # (3) main loop
             for i in range(50): # TODO: max_decoder_len
                 dec_inputs = torch.stack([b.get_current_state() for b in beam]).t().contiguous().view(-1, 1)
                 dec_inputs = self.charembedding(dec_inputs)
                 lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
-                lemmalogits = lemmalogits.view(3, batch_size, -1).transpose(0, 1) \
+                lemmalogits = lemmalogits.view(5, batch_size, -1).transpose(0, 1) \
                     .contiguous()  # [batch, beam, V]
 
                 # advance each beam
@@ -1181,7 +1214,7 @@ class MTLModel(nn.Module):
                     if is_done:
                         done += [b]
                     # update beam state
-                    self.update_state((hn, cn), b, beam[b].get_current_origin(), 3)
+                    self.update_state((hn, cn), b, beam[b].get_current_origin(), 5)
 
                 if len(done) == batch_size:
                     break
@@ -1260,7 +1293,7 @@ class Tagger():
                                            list(self.mtlmodel.lemmaencoder.parameters()) + list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
 
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,base_lr=learningrate/10,max_lr=learningrate,step_size_up=250,cycle_momentum=False)
-        self.evalstep = 1
+        self.evalstep = 100
 
         self.sigmoidthreshold = 0.5
 
@@ -1548,10 +1581,10 @@ class Tagger():
                     print('\n')
 
                     # save the best model
-                    if (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4 > bestf1:
-                        bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4
-                        bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
-                        torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
+                    #if (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4 > bestf1:
+                        #bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4
+                    bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
+                    torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
 
     def inference(self,toks,sent_tag='auto',checkpointfile=None):
 
