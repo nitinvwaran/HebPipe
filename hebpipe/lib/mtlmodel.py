@@ -231,7 +231,8 @@ class MTLModel(nn.Module):
         self.morphrnnbidirectional = morphrnnbidirectional
 
         # encoder for character lemmatization
-        self.lemmaencoder = nn.LSTM(input_size=256 + 768 + len(self.postagsetcrf),hidden_size=256,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
+        self.lemmaencoder = nn.LSTM(input_size=256 + 768 + len(self.postagsetcrf),hidden_size=512,num_layers=1,bidirectional=True,batch_first=True).to(self.device) # TODO: parameterize
+
         for name, param in self.lemmaencoder.named_parameters():
             try:
                 if 'bias' in name:
@@ -242,8 +243,8 @@ class MTLModel(nn.Module):
                 nn.init.constant_(param,0.0)
 
         # decoder for character lemmatization - with attention
-        self.lemmadecoder = LSTMAttention(input_size=256,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
-        self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
+        self.lemmadecoder = LSTMAttention(input_size=256,hidden_size=512*2,batch_first=True).to(self.device) # TODO: parameterize
+        self.dectovocab = nn.Linear(512*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
 
         for name, param in self.lemmadecoder.named_parameters():
             try:
@@ -477,8 +478,8 @@ class MTLModel(nn.Module):
 
     def zero_state(self, inputs):
         batch_size = inputs.size(0)
-        h0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 256, requires_grad=False) # TODO: parameterize
-        c0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 256, requires_grad=False)
+        h0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 512, requires_grad=False) # TODO: parameterize
+        c0 = torch.zeros(self.lemmaencoder.num_layers*2, batch_size, 512, requires_grad=False)
 
         return h0.cuda(), c0.cuda()
 
@@ -1530,6 +1531,12 @@ class Tagger():
 
                     correctlemma = sum([1 if p == g else 0 for p,g in zip(alllemmapreds,alllemmagold)])
                     lemmascores = Score(len(alllemmagold),len(alllemmapreds),correctlemma,len(alllemmapreds))
+
+                    # write the errors:
+                    with open ('lemmaerrors.csv','w') as lo:
+                        for p,g,pos in zip(alllemmapreds,alllemmagold,allposgold):
+                            lo.write(p + '\t' + g + '\t' + self.mtlmodel.postagsetcrf.get_item_for_index(pos) + '\t' + str(int(p == g)) + '\n')
+
 
                     # Write the scores and losses to tensorboard and console
                     mtlloss = (totalsbddevloss + totalposdevloss + totalfeatsdevloss) / len(devdata)

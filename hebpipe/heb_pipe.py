@@ -610,7 +610,7 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
     bound_group_map = get_bound_group_map(tokenized) if out_mode == "conllu" else None
 
     if mtltagger:
-        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_4.989451_0.930185_0.980181_0.6781_0.942534.pt')
+        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_5.140726_0.933196_0.981538_0.681267_0.97448.pt')
 
     if out_mode == "pipes":
         return tokenized
@@ -632,8 +632,8 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
 
     if do_tag:
         zeros = ["0" for i in range(len(morphs))]
-        zero_conllu = inject_col(zeros, tagged_conllu, into_col=6, skip_supertoks=True)
-        lemmas = lemmatize(lemmatizer, zero_conllu, morphs)
+        #zero_conllu = inject_col(zeros, tagged_conllu, into_col=6, skip_supertoks=True)
+        #lemmas = lemmatize(lemmatizer, zero_conllu, morphs)
         tagged = inject_col(tagged_conllu, tokenized, 4)
 
         if do_lemma:
