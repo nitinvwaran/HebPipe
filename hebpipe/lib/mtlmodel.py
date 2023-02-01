@@ -226,9 +226,9 @@ class MTLModel(nn.Module):
         self.encoderrnnbidirectional = encoderrnnbidirectional
 
         #Bi-LSTM Encoder for POS tagging
-        #self.posrnndim = posrnndim
-        #self.posrnnnumlayers = posrnnnumlayers
-        #self.posrnnbidirectional = posrnnbidirectional
+        self.posrnndim = posrnndim
+        self.posrnnnumlayers = posrnnnumlayers
+        self.posrnnbidirectional = posrnnbidirectional
 
         # Encoder for feats
         #self.morphrnndim = morphrnndim
@@ -251,18 +251,6 @@ class MTLModel(nn.Module):
         # decoder for character lemmatization - with attention
         self.lemmadecoder = LSTMAttention(input_size=256 + 256*2,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
         self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
-
-        #self.declinear = nn.Linear(in_features=256 + 256*2,out_features=256,).to(self.device)
-        """    
-        for name, param in self.declinear.named_parameters():
-            try:
-                if 'bias' in name:
-                    nn.init.constant_(param,0.0)
-                elif 'weight' in name:
-                    nn.init.xavier_uniform_(param)
-            except ValueError as ex:
-                nn.init.constant_(param,0.0)
-        """
 
         for name, param in self.lemmadecoder.named_parameters():
             try:
@@ -303,10 +291,10 @@ class MTLModel(nn.Module):
 
 
         if encodertype == 'lstm':
-            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
+            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
         elif encodertype == 'gru':
-            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,
+            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,
                                    num_layers=self.encoderrnnnumlayers, bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
 
@@ -319,7 +307,7 @@ class MTLModel(nn.Module):
             except ValueError as ex:
                 nn.init.constant_(param, 0.0)
 
-        """
+
         if posencodertype == 'lstm':
             self.posencoder = nn.LSTM(input_size=self.embeddingdim +  len(self.supertokenset) + 1, hidden_size=self.posrnndim // 2,
                                  num_layers=self.posrnnnumlayers, bidirectional=self.posrnnbidirectional,
@@ -339,6 +327,7 @@ class MTLModel(nn.Module):
             except ValueError as ex:
                 nn.init.constant_(param, 0.0)
 
+        """
         if morphencodertype == 'lstm':
             self.morphencoder = nn.LSTM(input_size=self.embeddingdim + len(self.postagsetcrf) + len(self.supertokenset) + 1, hidden_size=self.morphrnndim // 2,
                                  num_layers=self.morphrnnnumlayers, bidirectional=self.morphrnnbidirectional,
@@ -385,7 +374,7 @@ class MTLModel(nn.Module):
         # Intermediate feedforward layer
         #self.posembedding2nn = nn.Linear(in_features=self.embeddingdim + len(self.supertokenset) + 1,out_features=self.embeddingdim  +  len(self.supertokenset) + 1 ).to(self.device)
         self.posfflayerdim = posfflayerdim
-        self.posfflayer = nn.Linear(in_features=self.encoderrnndim, out_features=self.posfflayerdim).to(self.device)
+        self.posfflayer = nn.Linear(in_features=self.posrnndim, out_features=self.posfflayerdim).to(self.device)
 
         """
         # param init
@@ -1049,23 +1038,15 @@ class MTLModel(nn.Module):
                 cn = cn.data.repeat(5, 1)
             beam = [Beam(5, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
 
-
-        """
         # Add the SBD predictions to the POS Encoder Input!
         posembeddings = torch.cat((avgembeddings,sbdpreds,supertokenlabels),dim=2)
         posembeddings = self.dropout(posembeddings)
         posembeddings = self.worddropout(posembeddings)
         posembeddings = self.lockeddropout(posembeddings)
-        posembeddings = self.posembedding2nn(posembeddings)
-        """
+        #posembeddings = self.posembedding2nn(posembeddings)
 
-        sampledembeddings = self.dropout(sampledembeddings)
-        sampledembeddings = self.worddropout(sampledembeddings)
-        sampledembeddings = self.lockeddropout(sampledembeddings)
-
-        feats, _ = self.encoder(sampledembeddings)
-
-        posfeats = self.posfflayer(feats)
+        posfeats, _ = self.posencoder(posembeddings)
+        posfeats = self.posfflayer(posfeats)
         posfeats = self.relu(posfeats)
         posfeats = self.dropout(posfeats)
         posfeats = self.lockeddropout(posfeats)
@@ -1082,11 +1063,11 @@ class MTLModel(nn.Module):
         scores = (poslogits, lengths, self.poscrf.transitions)
         sents = []
         for s in sentences:
-            sents.append(Sentence(' '.join(s),use_tokenizer=False))
+            sents.append(Sentence(' '.join(s), use_tokenizer=False))
 
         pospreds = self.viterbidecoder.decode(scores, False, sents)
-        pospreds = [[self.postagsetcrf.get_idx_for_item(p[0])for p in pr] for pr in pospreds[0]]
-        """
+        pospreds = [[self.postagsetcrf.get_idx_for_item(p[0]) for p in pr] for pr in pospreds[0]]
+
         pospredsonehot = []
         for pred in pospreds:
             preds = []
@@ -1098,7 +1079,15 @@ class MTLModel(nn.Module):
 
         pospredsonehot = torch.LongTensor(pospredsonehot)
         pospredsonehot = pospredsonehot.to(self.device)
-        """
+
+
+        sampledembeddings = self.dropout(torch.cat((sampledembeddings,pospredsonehot),dim=2))
+        sampledembeddings = self.worddropout(sampledembeddings)
+        sampledembeddings = self.lockeddropout(sampledembeddings)
+
+        feats, _ = self.encoder(sampledembeddings)
+
+
 
         """
         morphembeddings = torch.cat((avgembeddings, sbdpreds, supertokenlabels,pospredsonehot), dim=2)
@@ -1121,6 +1110,7 @@ class MTLModel(nn.Module):
 
             lemmahnrep = torch.reshape(feats,(-1,feats.size(dim=2)))
             lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
+
             dec_inputs = torch.cat((dec_inputs,lemmahnrep),dim=2)
 
             lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
@@ -1135,8 +1125,8 @@ class MTLModel(nn.Module):
                 lemmahnrep = torch.reshape(feats, (-1, feats.size(dim=2)))
                 lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
                 lemmahnrep = lemmahnrep.data.repeat(5, 1, 1)
+
                 dec_inputs = torch.cat((dec_inputs, lemmahnrep), dim=2)
-                # dec_inputs = self.relu(self.declinear(dec_inputs))
 
                 lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
                 lemmalogits = lemmalogits.view(5, batch_size, -1).transpose(0, 1) \
@@ -1235,11 +1225,10 @@ class Tagger():
 
         self.optimizer = torch.optim.AdamW(list(self.mtlmodel.sbdencoder.parameters()) +  list(self.mtlmodel.sbdembedding2nn.parameters()) +
                                            list(self.mtlmodel.hidden2sbd.parameters()) +
-                                           #list(self.mtlmodel.posencoder.parameters()) + list(self.mtlmodel.posembedding2nn.parameters())
+                                           list(self.mtlmodel.posencoder.parameters()) +
                                             list(self.mtlmodel.hidden2postag.parameters()) + list(self.mtlmodel.poscrf.parameters())
                                            + list(self.mtlmodel.hidden2feats.parameters()) + list(self.mtlmodel.morphfflayer.parameters()) +
-                                           #list(self.mtlmodel.morphembedding2nn.parameters()) + list(self.mtlmodel.morphencoder.parameters())
-                                            list(self.mtlmodel.encoder.parameters()) + # list(self.mtlmodel.declinear.parameters()) +
+                                            list(self.mtlmodel.encoder.parameters()) +
                                             list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()) +
                                            list(self.mtlmodel.lemmadecoder.parameters()) + list(self.mtlmodel.lemmaencoder.parameters()) +
                                            list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
