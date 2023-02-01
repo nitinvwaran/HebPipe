@@ -610,7 +610,7 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
     bound_group_map = get_bound_group_map(tokenized) if out_mode == "conllu" else None
 
     if mtltagger:
-        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_5.140726_0.933196_0.981538_0.681267_0.97448.pt')
+        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_5.317285_0.933196_0.980995_0.634118_0.96733.pt')
 
     if out_mode == "pipes":
         return tokenized

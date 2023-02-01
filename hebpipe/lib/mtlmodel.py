@@ -1292,8 +1292,8 @@ class Tagger():
 
             return dataset
 
-        epochs = 5000
-        bestf1 = float('-inf')
+        epochs = 15000
+
 
         trainingdata = read_file()
         devdata = read_file(mode='dev')
