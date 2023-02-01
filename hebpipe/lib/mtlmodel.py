@@ -249,7 +249,7 @@ class MTLModel(nn.Module):
                 nn.init.constant_(param,0.0)
 
         # decoder for character lemmatization - with attention
-        self.lemmadecoder = LSTMAttention(input_size=256 + 256*2,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
+        self.lemmadecoder = LSTMAttention(input_size=256 + 256*2 + len(self.postagsetcrf),hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
         self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
 
         #self.declinear = nn.Linear(in_features=256 + 256*2,out_features=256,).to(self.device)
@@ -1086,7 +1086,7 @@ class MTLModel(nn.Module):
 
         pospreds = self.viterbidecoder.decode(scores, False, sents)
         pospreds = [[self.postagsetcrf.get_idx_for_item(p[0])for p in pr] for pr in pospreds[0]]
-        """
+
         pospredsonehot = []
         for pred in pospreds:
             preds = []
@@ -1098,7 +1098,6 @@ class MTLModel(nn.Module):
 
         pospredsonehot = torch.LongTensor(pospredsonehot)
         pospredsonehot = pospredsonehot.to(self.device)
-        """
 
         """
         morphembeddings = torch.cat((avgembeddings, sbdpreds, supertokenlabels,pospredsonehot), dim=2)
@@ -1121,7 +1120,10 @@ class MTLModel(nn.Module):
 
             lemmahnrep = torch.reshape(feats,(-1,feats.size(dim=2)))
             lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
-            dec_inputs = torch.cat((dec_inputs,lemmahnrep),dim=2)
+
+            poscharrep = torch.reshape(pospredsonehot,(-1, pospredsonehot.size(dim=2)))
+            poscharrep = poscharrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
+            dec_inputs = torch.cat((dec_inputs,lemmahnrep,poscharrep),dim=2)
 
             lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
 
@@ -1135,7 +1137,12 @@ class MTLModel(nn.Module):
                 lemmahnrep = torch.reshape(feats, (-1, feats.size(dim=2)))
                 lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
                 lemmahnrep = lemmahnrep.data.repeat(5, 1, 1)
-                dec_inputs = torch.cat((dec_inputs, lemmahnrep), dim=2)
+
+                poscharrep = torch.reshape(pospredsonehot,(-1, pospredsonehot.size(dim=2)))
+                poscharrep = poscharrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
+                poscharrep = poscharrep.data.repeat(5, 1, 1)
+
+                dec_inputs = torch.cat((dec_inputs, lemmahnrep,poscharrep), dim=2)
                 # dec_inputs = self.relu(self.declinear(dec_inputs))
 
                 lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
