@@ -1084,9 +1084,6 @@ class MTLModel(nn.Module):
             tgtinarr = tgtinarr.to(self.device)
             tgtinarr = torch.reshape(tgtinarr,(-1,tgtinarr.size(dim=2)))
 
-            #tgtmask = torch.eq(tgtinarr,self.chartoidx['<PAD>'])
-            #tgtmask = tgtmask.to(self.device)
-
             tgtoutarr = torch.LongTensor(lemmatgtoutarr)
             tgtoutarr = tgtoutarr.to(self.device)
             tgtoutarr = torch.reshape(tgtoutarr,(-1,tgtoutarr.size(dim=2)))
@@ -1094,21 +1091,8 @@ class MTLModel(nn.Module):
             #batch_size = srcarr.size(0)
             enc_inputs = self.char_emb_drop(torch.cat((self.charembedding(srcarr),finalwordembeddings,finalpospreds),dim=2))
             dec_inputs = self.char_emb_drop(self.charembedding(tgtinarr))
-            """
-            if self.use_pos:
-                pos_inputs = self.pos_drop(self.pos_embedding(pos))
-                enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
-                pos_src_mask = src_mask.new_zeros([batch_size, 1])
-                src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
-            """
 
             h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
-
-            if self.edit:
-                edit_logits = self.edit_clf(hn)
-            else:
-                edit_logits = None
-
 
             lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
             all_hyp = None
@@ -1175,21 +1159,8 @@ class MTLModel(nn.Module):
 
             enc_inputs = torch.cat((self.charembedding(srcarr),finalwordembeddings,finalpospreds),dim=2)
             batch_size = enc_inputs.size(0)
-            """
-            if self.use_pos:
-                pos_inputs = self.pos_drop(self.pos_embedding(pos))
-                enc_inputs = torch.cat([pos_inputs.unsqueeze(1), enc_inputs], dim=1)
-                pos_src_mask = src_mask.new_zeros([batch_size, 1])
-                src_mask = torch.cat([pos_src_mask, src_mask], dim=1)
-            src_lens = list(src_mask.data.eq(constant.PAD_ID).long().sum(1))
-            """
 
             h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
-
-            if self.edit:
-                edit_logits = self.edit_clf(hn)
-            else:
-                edit_logits = None
 
             # (2) set up beam
             with torch.no_grad():
@@ -1298,6 +1269,30 @@ class Tagger():
 
         self.sigmoidthreshold = 0.5
 
+        # adding L2 regularization here across the encoders ('Soft' Parameter Sharing).
+        self.l2_reg = None
+        self.weightdecay = 0.01
+        for name,p in self.mtlmodel.posencoder.named_parameters():
+            if 'weight' in name:
+                if self.l2_reg is None:
+                    self.l2_reg = p.norm(2)
+                else:
+                    self.l2_reg = self.l2_reg + p.norm(2)
+
+        for name,p in self.mtlmodel.morphencoder.named_parameters():
+            if 'weight' in name:
+                if self.l2_reg is None:
+                    self.l2_reg = p.norm(2)
+                else:
+                    self.l2_reg = self.l2_reg + p.norm(2)
+
+        for name,p in self.mtlmodel.posencoder.named_parameters():
+            if 'weight' in name:
+                if self.l2_reg is None:
+                    self.l2_reg = p.norm(2)
+                else:
+                    self.l2_reg = self.l2_reg + p.norm(2)
+
     def set_seed(self, seed):
 
         random.seed(seed)
@@ -1386,7 +1381,7 @@ class Tagger():
 
             lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())), lemmalabels.view(-1))
 
-            mtlloss = posloss + sbdloss + featsloss + lemmaloss # TODO: learnable weights?
+            mtlloss = posloss + sbdloss + featsloss + lemmaloss + self.l2_reg * self.weightdecay # 'soft' l2 regularization
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
