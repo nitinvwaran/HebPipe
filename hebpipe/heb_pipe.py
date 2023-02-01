@@ -610,7 +610,7 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
     bound_group_map = get_bound_group_map(tokenized) if out_mode == "conllu" else None
 
     if mtltagger:
-        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_5.317285_0.933196_0.980995_0.634118_0.96733.pt')
+        tagged_conllu, tokenized, morphs, words,lemmas = mtltagger.predict(tokenized,sent_tag=sent_tag,checkpointfile='/home/nitin/Desktop/hebpipe/HebPipe/hebpipe/data/checkpoint/htb_best_mtlmodel_4.87792_0.932377_0.98_0.678824_0.975566.pt')
 
     if out_mode == "pipes":
         return tokenized
@@ -631,9 +631,6 @@ def nlp(input_data, do_whitespace=True, do_tok=True, do_tag=True, do_lemma=True,
     torch.cuda.empty_cache()
 
     if do_tag:
-        zeros = ["0" for i in range(len(morphs))]
-        #zero_conllu = inject_col(zeros, tagged_conllu, into_col=6, skip_supertoks=True)
-        #lemmas = lemmatize(lemmatizer, zero_conllu, morphs)
         tagged = inject_col(tagged_conllu, tokenized, 4)
 
         if do_lemma:
