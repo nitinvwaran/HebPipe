@@ -291,10 +291,10 @@ class MTLModel(nn.Module):
 
 
         if encodertype == 'lstm':
-            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
+            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
         elif encodertype == 'gru':
-            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,
+            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,
                                    num_layers=self.encoderrnnnumlayers, bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
 
@@ -1068,7 +1068,7 @@ class MTLModel(nn.Module):
         pospreds = self.viterbidecoder.decode(scores, False, sents)
         pospreds = [[self.postagsetcrf.get_idx_for_item(p[0]) for p in pr] for pr in pospreds[0]]
 
-        """
+
         pospredsonehot = []
         for pred in pospreds:
             preds = []
@@ -1080,11 +1080,11 @@ class MTLModel(nn.Module):
 
         pospredsonehot = torch.LongTensor(pospredsonehot)
         pospredsonehot = pospredsonehot.to(self.device)
-        """
 
 
-        #sampledembeddings = self.dropout(torch.cat((sampledembeddings,pospredsonehot),dim=2))
-        sampledembeddings = self.dropout(sampledembeddings)
+
+        sampledembeddings = self.dropout(torch.cat((sampledembeddings,pospredsonehot),dim=2))
+        #sampledembeddings = self.dropout(sampledembeddings)
         sampledembeddings = self.worddropout(sampledembeddings)
         sampledembeddings = self.lockeddropout(sampledembeddings)
 
