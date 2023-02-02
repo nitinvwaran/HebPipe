@@ -291,10 +291,10 @@ class MTLModel(nn.Module):
 
 
         if encodertype == 'lstm':
-            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
+            self.encoder = nn.LSTM(input_size = self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,num_layers=self.encoderrnnnumlayers,bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
         elif encodertype == 'gru':
-            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256 + len(self.postagsetcrf), hidden_size=self.encoderrnndim // 2,
+            self.encoder = nn.GRU(input_size=self.embeddingdim + 2 * 256, hidden_size=self.encoderrnndim // 2,
                                    num_layers=self.encoderrnnnumlayers, bidirectional=self.encoderrnnbidirectional,
                                    batch_first=True).to(self.device)
 
@@ -309,11 +309,11 @@ class MTLModel(nn.Module):
 
 
         if posencodertype == 'lstm':
-            self.posencoder = nn.LSTM(input_size=self.embeddingdim +  len(self.supertokenset) + 1, hidden_size=self.posrnndim // 2,
+            self.posencoder = nn.LSTM(input_size=self.embeddingdim + 2 * 256, hidden_size=self.posrnndim // 2,
                                  num_layers=self.posrnnnumlayers, bidirectional=self.posrnnbidirectional,
                                  batch_first=True).to(self.device)
         elif posencodertype == 'gru':
-            self.posencoder = nn.GRU(input_size=self.embeddingdim +  len(self.supertokenset) + 1 , hidden_size=self.posrnndim // 2,
+            self.posencoder = nn.GRU(input_size=self.embeddingdim +  2 * 256 , hidden_size=self.posrnndim // 2,
                                    num_layers=self.posrnnnumlayers, bidirectional=self.posrnnbidirectional,
                                    batch_first=True).to(self.device)
 
@@ -1039,8 +1039,8 @@ class MTLModel(nn.Module):
             beam = [Beam(5, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
 
         # Add the SBD predictions to the POS Encoder Input!
-        posembeddings = torch.cat((avgembeddings,sbdpreds,supertokenlabels),dim=2)
-        posembeddings = self.dropout(posembeddings)
+        #posembeddings = torch.cat((sampledembeddings,sbdpreds,supertokenlabels),dim=2)
+        posembeddings = self.dropout(sampledembeddings)
         posembeddings = self.worddropout(posembeddings)
         posembeddings = self.lockeddropout(posembeddings)
         #posembeddings = self.posembedding2nn(posembeddings)
@@ -1068,6 +1068,7 @@ class MTLModel(nn.Module):
         pospreds = self.viterbidecoder.decode(scores, False, sents)
         pospreds = [[self.postagsetcrf.get_idx_for_item(p[0]) for p in pr] for pr in pospreds[0]]
 
+        """
         pospredsonehot = []
         for pred in pospreds:
             preds = []
@@ -1079,23 +1080,15 @@ class MTLModel(nn.Module):
 
         pospredsonehot = torch.LongTensor(pospredsonehot)
         pospredsonehot = pospredsonehot.to(self.device)
+        """
 
 
-        sampledembeddings = self.dropout(torch.cat((sampledembeddings,pospredsonehot),dim=2))
+        #sampledembeddings = self.dropout(torch.cat((sampledembeddings,pospredsonehot),dim=2))
+        sampledembeddings = self.dropout(sampledembeddings)
         sampledembeddings = self.worddropout(sampledembeddings)
         sampledembeddings = self.lockeddropout(sampledembeddings)
 
         feats, _ = self.encoder(sampledembeddings)
-
-
-
-        """
-        morphembeddings = torch.cat((avgembeddings, sbdpreds, supertokenlabels,pospredsonehot), dim=2)
-        morphembeddings = self.dropout(morphembeddings)
-        morphembeddings = self.worddropout(morphembeddings)
-        morphembeddings = self.lockeddropout(morphembeddings)
-        morphembeddings = self.morphembedding2nn(morphembeddings)
-        """
 
         #feats, _ = self.morphencoder(morphembeddings)
         morphfeats = self.morphfflayer(feats)
