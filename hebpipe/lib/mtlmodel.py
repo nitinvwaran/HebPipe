@@ -1268,7 +1268,7 @@ class Tagger():
             return dataset
 
         epochs = 15000
-        bestf1 = float('-inf')
+        self.bestf1 = float('-inf')
 
 
         trainingdata = read_file()
@@ -1515,8 +1515,8 @@ class Tagger():
                     print('\n')
 
                     # save the best model
-                    if (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3 > bestf1:
-                        bestf1 = (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3
+                    if (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3 > self.bestf1:
+                        self.bestf1 = (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3
                         bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
                         torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
 
