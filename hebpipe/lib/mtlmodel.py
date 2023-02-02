@@ -1270,28 +1270,6 @@ class Tagger():
         self.sigmoidthreshold = 0.5
 
         # adding L2 regularization here across the encoders ('Soft' Parameter Sharing).
-        self.l2_reg = None
-        self.weightdecay = 0.01
-        for name,p in self.mtlmodel.posencoder.named_parameters():
-            if 'weight' in name:
-                if self.l2_reg is None:
-                    self.l2_reg = p.norm(2)
-                else:
-                    self.l2_reg = self.l2_reg + p.norm(2)
-
-        for name,p in self.mtlmodel.morphencoder.named_parameters():
-            if 'weight' in name:
-                if self.l2_reg is None:
-                    self.l2_reg = p.norm(2)
-                else:
-                    self.l2_reg = self.l2_reg + p.norm(2)
-
-        for name,p in self.mtlmodel.posencoder.named_parameters():
-            if 'weight' in name:
-                if self.l2_reg is None:
-                    self.l2_reg = p.norm(2)
-                else:
-                    self.l2_reg = self.l2_reg + p.norm(2)
 
     def set_seed(self, seed):
 
@@ -1336,7 +1314,7 @@ class Tagger():
 
             return dataset
 
-        epochs = 5000
+        epochs = 15000
         bestf1 = float('-inf')
 
         trainingdata = read_file()
@@ -1381,7 +1359,33 @@ class Tagger():
 
             lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())), lemmalabels.view(-1))
 
-            mtlloss = posloss + sbdloss + featsloss + lemmaloss + self.l2_reg * self.weightdecay # 'soft' l2 regularization
+            l2_reg = None
+            weightdecay = 0.01
+            """
+            for name, p in self.mtlmodel.posencoder.named_parameters():
+                if 'weight' in name:
+                    if l2_reg is None:
+                       l2_reg = p.norm(2)
+                    else:
+                        l2_reg = l2_reg + p.norm(2)
+            """
+
+            for name, p in self.mtlmodel.morphencoder.named_parameters():
+                if 'weight' in name:
+                    if l2_reg is None:
+                        l2_reg = p.norm(2)
+                    else:
+                        l2_reg = l2_reg + p.norm(2)
+
+
+            for name, p in self.mtlmodel.lemmaencoder.named_parameters():
+                if 'weight' in name:
+                    if l2_reg is None:
+                        l2_reg = p.norm(2)
+                    else:
+                        l2_reg = l2_reg + p.norm(2)
+
+            mtlloss = posloss + sbdloss + featsloss + lemmaloss + l2_reg * weightdecay # 'soft' l2 regularization
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -2078,7 +2082,7 @@ class Tagger():
 def main(): # testing only
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seqlen', type=int, default=64)
     parser.add_argument('--trainbatch', type=int, default=32)
     parser.add_argument('--datatype', type=str, default='htb')
