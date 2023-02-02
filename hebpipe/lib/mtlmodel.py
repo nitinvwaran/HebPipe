@@ -1007,15 +1007,7 @@ class MTLModel(nn.Module):
 
             # final 'word embedding' from the characters
             lemmahn = torch.reshape(hn, (avgembeddings.size(dim=0), -1, hn.size(dim=1)))
-            # repeat the character level word embedding
-            #lemmahnrep = torch.reshape(avgembeddings,(-1,avgembeddings.size(dim=2)))
-            #lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
-
             sampledembeddings = torch.cat((avgembeddings,lemmahn),dim=2) # char embeddings + averaged word embeddings
-            #dec_inputs = torch.cat((dec_inputs,lemmahnrep),dim=2)
-            #dec_inputs = self.relu(self.declinear(dec_inputs))
-
-            #lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
 
             all_hyp = None
 
@@ -1047,17 +1039,9 @@ class MTLModel(nn.Module):
                 # repeat decoder hidden states
                 hn = hn.data.repeat(5, 1)
                 cn = cn.data.repeat(5, 1)
+
             beam = [Beam(5, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
 
-
-        """
-        # Add the SBD predictions to the POS Encoder Input!
-        posembeddings = torch.cat((avgembeddings,sbdpreds,supertokenlabels),dim=2)
-        posembeddings = self.dropout(posembeddings)
-        posembeddings = self.worddropout(posembeddings)
-        posembeddings = self.lockeddropout(posembeddings)
-        posembeddings = self.posembedding2nn(posembeddings)
-        """
 
         sampledembeddings = self.dropout(sampledembeddings)
         sampledembeddings = self.worddropout(sampledembeddings)
@@ -1087,6 +1071,7 @@ class MTLModel(nn.Module):
         pospreds = self.viterbidecoder.decode(scores, False, sents)
         pospreds = [[self.postagsetcrf.get_idx_for_item(p[0])for p in pr] for pr in pospreds[0]]
 
+        """
         pospredsonehot = []
         for pred in pospreds:
             preds = []
@@ -1098,16 +1083,8 @@ class MTLModel(nn.Module):
 
         pospredsonehot = torch.LongTensor(pospredsonehot)
         pospredsonehot = pospredsonehot.to(self.device)
-
-        """
-        morphembeddings = torch.cat((avgembeddings, sbdpreds, supertokenlabels,pospredsonehot), dim=2)
-        morphembeddings = self.dropout(morphembeddings)
-        morphembeddings = self.worddropout(morphembeddings)
-        morphembeddings = self.lockeddropout(morphembeddings)
-        morphembeddings = self.morphembedding2nn(morphembeddings)
         """
 
-        #feats, _ = self.morphencoder(morphembeddings)
         morphfeats = self.morphfflayer(feats)
         morphfeats = self.relu(morphfeats)
         morphfeats = self.dropout(morphfeats)
@@ -1121,9 +1098,7 @@ class MTLModel(nn.Module):
             lemmahnrep = torch.reshape(feats,(-1,feats.size(dim=2)))
             lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
 
-            poscharrep = torch.reshape(pospredsonehot,(-1, pospredsonehot.size(dim=2)))
-            poscharrep = poscharrep.unsqueeze(1).repeat(1,dec_inputs.size(dim=1),1)
-            dec_inputs = torch.cat((dec_inputs,lemmahnrep,poscharrep),dim=2)
+            dec_inputs = torch.cat((dec_inputs,lemmahnrep),dim=2)
 
             lemmalogits, _ = self.lemmadecode(dec_inputs, hn, cn, h_in, srcmask, src=srcarr)
 
@@ -1138,12 +1113,7 @@ class MTLModel(nn.Module):
                 lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
                 lemmahnrep = lemmahnrep.data.repeat(5, 1, 1)
 
-                poscharrep = torch.reshape(pospredsonehot,(-1, pospredsonehot.size(dim=2)))
-                poscharrep = poscharrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
-                poscharrep = poscharrep.data.repeat(5, 1, 1)
-
-                dec_inputs = torch.cat((dec_inputs, lemmahnrep,poscharrep), dim=2)
-                # dec_inputs = self.relu(self.declinear(dec_inputs))
+                dec_inputs = torch.cat((dec_inputs, lemmahnrep), dim=2)
 
                 lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
                 lemmalogits = lemmalogits.view(5, batch_size, -1).transpose(0, 1) \
@@ -1242,11 +1212,9 @@ class Tagger():
 
         self.optimizer = torch.optim.AdamW(list(self.mtlmodel.sbdencoder.parameters()) +  list(self.mtlmodel.sbdembedding2nn.parameters()) +
                                            list(self.mtlmodel.hidden2sbd.parameters()) +
-                                           #list(self.mtlmodel.posencoder.parameters()) + list(self.mtlmodel.posembedding2nn.parameters())
                                             list(self.mtlmodel.hidden2postag.parameters()) + list(self.mtlmodel.poscrf.parameters())
                                            + list(self.mtlmodel.hidden2feats.parameters()) + list(self.mtlmodel.morphfflayer.parameters()) +
-                                           #list(self.mtlmodel.morphembedding2nn.parameters()) + list(self.mtlmodel.morphencoder.parameters())
-                                            list(self.mtlmodel.encoder.parameters()) + # list(self.mtlmodel.declinear.parameters()) +
+                                           list(self.mtlmodel.encoder.parameters()) +
                                             list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()) +
                                            list(self.mtlmodel.lemmadecoder.parameters()) + list(self.mtlmodel.lemmaencoder.parameters()) +
                                            list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
