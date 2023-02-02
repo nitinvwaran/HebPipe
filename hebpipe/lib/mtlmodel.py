@@ -1235,6 +1235,7 @@ class Tagger():
 
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,base_lr=learningrate/10,max_lr=learningrate,step_size_up=250,cycle_momentum=False)
         self.evalstep = 100
+        self.bestf1 = float('-inf')
 
         self.sigmoidthreshold = 0.5
 
@@ -1528,10 +1529,10 @@ class Tagger():
                     print('\n')
 
                     # save the best model
-                    #if (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4 > bestf1:
-                        #bestf1 = (sbdscores.f1 + posscores.f1 + featsscores.f1 + lemmascores.f1) / 4
-                    bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
-                    torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
+                    if (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3 > self.bestf1:
+                        self.bestf1 = (posscores.f1 + featsscores.f1 + lemmascores.f1) / 3
+                        bestmodel = self.bestmodel.replace('.pt','_' + str(round(mtlloss,6)) + '_' + str(round(sbdscores.f1,6)) + '_' + str(round(posscores.f1,6)) + '_' + str(round(featsscores.f1,6)) + '_' + str(round(lemmascores.f1,6)) + '.pt')
+                        torch.save({'epoch':epoch,'model_state_dict':self.mtlmodel.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'poscrf_state_dict':self.mtlmodel.poscrf.state_dict()},bestmodel)
 
     def inference(self,toks,sent_tag='auto',checkpointfile=None):
 
