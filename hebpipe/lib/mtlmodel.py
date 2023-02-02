@@ -249,7 +249,7 @@ class MTLModel(nn.Module):
                 nn.init.constant_(param,0.0)
 
         # decoder for character lemmatization - with attention
-        self.lemmadecoder = LSTMAttention(input_size=256 + 256*2 + len(self.postagsetcrf),hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
+        self.lemmadecoder = LSTMAttention(input_size=256 + 256*2,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
         self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
 
         #self.declinear = nn.Linear(in_features=256 + 256*2,out_features=256,).to(self.device)
