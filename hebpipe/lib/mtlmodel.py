@@ -1346,6 +1346,7 @@ class Tagger():
             l2_reg = None
             weightdecay = 0.01
 
+            """
             for name, p in self.mtlmodel.posencoder.named_parameters():
                 if 'weight' in name:
                     if l2_reg is None:
@@ -1353,7 +1354,7 @@ class Tagger():
                     else:
                         l2_reg = l2_reg + p.norm(2)
             
-
+            """
             for name, p in self.mtlmodel.morphencoder.named_parameters():
                 if 'weight' in name:
                     if l2_reg is None:
