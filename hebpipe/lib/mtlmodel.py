@@ -2074,7 +2074,7 @@ def main(): # testing only
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seqlen', type=int, default=64)
-    parser.add_argument('--trainbatch', type=int, default=32)
+    parser.add_argument('--trainbatch', type=int, default=16)
     parser.add_argument('--datatype', type=str, default='htb')
     parser.add_argument('--sbdrnndim', type=int, default=256)
     parser.add_argument('--posrnndim', type=int, default=512)
