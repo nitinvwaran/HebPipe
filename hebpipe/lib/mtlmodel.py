@@ -647,7 +647,7 @@ class MTLModel(nn.Module):
 
                     featsrecord.append(tempfeats)
 
-                supertokenlabels.append(record)
+
                 featslabels.append(featsrecord)
 
             # for the lemma, its hard to use all the data. So sample a couple of records instead and store the index , which is used later to retrieve POS / morph tags / etc from data
