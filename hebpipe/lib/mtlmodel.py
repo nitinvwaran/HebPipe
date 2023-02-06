@@ -1137,7 +1137,10 @@ class MTLModel(nn.Module):
             sbdpreds = None
             pospreds = None
 
-        lemmafeats,_ = self.lemmawordencoder(sampledembeddings)
+        lemmaembeddings = self.dropout(sampledembeddings)
+        lemmaembeddings = self.worddropout(lemmaembeddings)
+        lemmaembeddings = self.lockeddropout(lemmaembeddings)
+        lemmafeats,_ = self.lemmawordencoder(lemmaembeddings)
 
         if mode == 'train':
 
