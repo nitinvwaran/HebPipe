@@ -151,14 +151,26 @@ class MTLModel(nn.Module):
     def __init__(self,sbdrnndim=256,posrnndim=512,morphrnndim=512,lemmawordrnndim=512,sbdrnnnumlayers=1,posrnnnumlayers=1,morphrnnnumlayers=1,lemmawordrnnnumlayers=1,posfflayerdim=512,morphfflayerdim=512,sbdrnnbidirectional=True,posrnnbidirectional=True,morphrnnbidirectional=True,lemmawordrnnbidirectional=True,sbdencodertype='lstm',sbdfflayerdim=256,posencodertype='lstm',morphencodertype='lstm',lemmawordencodertype='lstm',batchsize=32,sequencelength=256,dropout=0.0,wordropout=0.05,lockeddropout=0.5,cpu=False,lemmadict='data/char_vocab.txt'):
         super(MTLModel,self).__init__()
 
-        self.copy = False
-        self.use_pos = False
-        self.edit = False
+        self.copy = True
+        self.edit = True
+
+        self.edittoid = {'none': 0, 'identity': 1}
+
 
         if cpu == False:
             self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         else:
             self.device = "cpu"
+
+        if self.edit == True:
+            edit_hidden = 256
+            self.edit_clf = nn.Sequential(
+                nn.Linear(512, edit_hidden),
+                nn.ReLU(),
+                nn.Linear(edit_hidden, len(self.edittoid.keys()))).to(self.device)
+
+
+
 
         # tagsets - amend labels here
         self.postagset = {'ADJ':0, 'ADP':1, 'ADV':2, 'AUX':3, 'CCONJ':4, 'DET':5, 'INTJ':6, 'NOUN':7, 'NUM':8, 'PRON':9, 'PROPN':10, 'PUNCT':11, 'SCONJ':12, 'SYM':13, 'VERB':14, 'X':15} # derived from HTB and IAHLTWiki trainsets #TODO: add other UD tags?
@@ -251,6 +263,9 @@ class MTLModel(nn.Module):
         # decoder for character lemmatization - with attention
         self.lemmadecoder = LSTMAttention(input_size=256 + 256 * 2,hidden_size=256*2,batch_first=True).to(self.device) # TODO: parameterize
         self.dectovocab = nn.Linear(256*2,len(self.chartoidx.keys())).to(self.device) # TODO: parameterize
+
+        if self.copy:
+            self.copy_gate = nn.Linear(256 * 2, 1).to(self.device)
 
         for name, param in self.lemmadecoder.named_parameters():
             try:
@@ -547,9 +562,6 @@ class MTLModel(nn.Module):
 
         if self.copy == True:
             copy_logit = self.copy_gate(h_out)
-            if self.use_pos:
-                # can't copy the UPOS
-                log_attn = log_attn[:, :, 1:]
 
             # renormalize
             log_attn = torch.log_softmax(log_attn, -1)
@@ -599,11 +611,13 @@ class MTLModel(nn.Module):
         badrecords = [] # stores records where AlephBERT's tokenization 'messed up' the sentence's sequence length, and removes these sentences from the batch.
         featslabels = None
 
+        edittypes = None
         # Extract the sentences and labels
         if mode == 'train': # training is on a batch, so 3D tensor
             sentences = [' '.join([s.split('\t')[0].strip() for s in sls]) for sls in data]
             sbdlabels = [[self.sbd_tag2idx[s.split('\t')[2].strip()] for s in sls] for sls in data]
             poslabels = [[self.postagsetcrf.get_idx_for_item(s.split('\t')[1].strip()) for s in sls] for sls in data]
+            edittypes = [[1 if s.split('\t')[0].strip().lower() == s.split('\t')[6].strip().lower() else 0 for s in sls] for sls in data]
 
             supertokenlabels = []
             featslabels = []
@@ -991,6 +1005,11 @@ class MTLModel(nn.Module):
 
             h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
 
+            if self.edit == True:
+                edit_logits = self.edit_clf(hn)
+            else:
+                edit_logits = None
+
             lemmahn = torch.reshape(hn, (avgembeddings.size(dim=0), -1, hn.size(dim=1)))
 
             sampledembeddings = torch.cat((avgembeddings, lemmahn), dim=2)  # char embeddings + averaged word embeddings
@@ -1014,6 +1033,11 @@ class MTLModel(nn.Module):
             batch_size = enc_inputs.size(0)
 
             h_in, (hn, cn) = self.lemmaencode(enc_inputs, srclengths)
+
+            if self.edit:
+                edit_logits = self.edit_clf(hn)
+            else:
+                edit_logits = None
 
             # (2) set up beam
             with torch.no_grad():
@@ -1194,7 +1218,7 @@ class MTLModel(nn.Module):
 
             lemmalogits = None
 
-        return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels,lemmalogits,tgtoutarr, all_hyp # returns the logits and labels
+        return sbdlogits, finalsbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits,featslabels,lemmalogits,tgtoutarr, all_hyp, edit_logits, edittypes # returns the logits and labels
 
 class Tagger():
     def __init__(self,trainflag=False,trainfile=None,devfile=None,testfile=None,sbdrnndim=256,sbdrnnnumlayers=1,sbdrnnbidirectional=True,sbdfflayerdim=256,posrnndim=512,posrnnnumlayers=1,posrnnbidirectional=True,posfflayerdim=512,morphrnndim=512,morphrnnnumlayers=1,morphrnnbidirectional=True,morphfflayerdim=512,morphencodertype='lstm',dropout=0.05,wordropout=0.05,lockeddropout=0.5,sbdencodertype='lstm',posencodertype='lstm',learningrate = 0.001,bestmodelpath='../data/checkpoint/',batchsize=32,sequencelength=256,datatype='htb',cpu=False,lemmadict='data/char_vocab.txt'):
@@ -1223,6 +1247,7 @@ class Tagger():
         else:
             self.device = "cpu"
 
+
         self.trainflag = trainflag
         self.trainfile = trainfile
         self.devfile = devfile
@@ -1241,18 +1266,21 @@ class Tagger():
         self.featsloss = nn.BCEWithLogitsLoss()
         self.featsloss.to(self.device)
 
+        if self.edit:
+            self.editclfloss = nn.CrossEntropyLoss().to(self.device)
+
         weight = torch.ones(len(self.mtlmodel.chartoidx.keys()))
         weight[self.mtlmodel.chartoidx['<PAD>']] = 0
         self.lemmaloss = nn.NLLLoss(weight)
         self.lemmaloss.to(self.device)
 
-        self.optimizer = torch.optim.AdamW(list(self.mtlmodel.sbdencoder.parameters()) +  list(self.mtlmodel.sbdembedding2nn.parameters()) +
-                                           list(self.mtlmodel.hidden2sbd.parameters()) + list(self.mtlmodel.posencoder.parameters())
-                                           + list(self.mtlmodel.hidden2postag.parameters()) + list(self.mtlmodel.poscrf.parameters())
-                                           + list(self.mtlmodel.hidden2feats.parameters()) + list(self.mtlmodel.morphfflayer.parameters()) + list(self.mtlmodel.morphencoder.parameters())
-                                           + list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()) + list(self.mtlmodel.lemmadecoder.parameters()) +
-                                             list(self.mtlmodel.lemmawordencoder.parameters()) +
-                                           list(self.mtlmodel.lemmaencoder.parameters()) + list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters()), lr=learningrate)
+        optimparams = list(self.mtlmodel.sbdencoder.parameters()) + list(self.mtlmodel.sbdembedding2nn.parameters()) + list(self.mtlmodel.hidden2sbd.parameters()) + list(self.mtlmodel.posencoder.parameters()) + list(self.mtlmodel.hidden2postag.parameters()) + list(self.mtlmodel.poscrf.parameters()) + list(self.mtlmodel.hidden2feats.parameters()) + list(self.mtlmodel.morphfflayer.parameters()) + list(self.mtlmodel.morphencoder.parameters()) + list(self.mtlmodel.posfflayer.parameters()) + list(self.mtlmodel.sbdfflayer.parameters()) + list(self.mtlmodel.lemmadecoder.parameters()) + list(self.mtlmodel.lemmawordencoder.parameters()) + list(self.mtlmodel.lemmaencoder.parameters()) + list(self.mtlmodel.dectovocab.parameters()) + list(self.mtlmodel.charembedding.parameters())
+        if self.mtlmodel.edit:
+            optimparams = optimparams + list(self.mtlmodel.edit_clf.parameters())
+        if self.mtlmodel.copy:
+            optimparams = optimparams + list(self.mtlmodel.copy_gate.parameters())
+
+        self.optimizer = torch.optim.AdamW(optimparams, lr=learningrate)
 
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,base_lr=learningrate/10,max_lr=learningrate,step_size_up=250,cycle_momentum=False)
         self.evalstep = 100
@@ -1304,7 +1332,7 @@ class Tagger():
 
             return dataset
 
-        epochs = 15000
+        epochs = 7500
         bestf1 = float('-inf')
 
         trainingdata = read_file()
@@ -1329,7 +1357,7 @@ class Tagger():
             data = [datum for datum in data if len(datum) == self.mtlmodel.sequence_length]
             self.mtlmodel.batch_size = len(data)
 
-            sbdlogits, sbdlabels, _, poslogits, poslabels, _ , featslogits, featslabels,lemmalogits,lemmalabels, _ = self.mtlmodel(data)
+            sbdlogits, sbdlabels, _, poslogits, poslabels, _ , featslogits, featslabels,lemmalogits,lemmalabels, _, editlogits, edittypes = self.mtlmodel(data)
 
             sbdtags = torch.LongTensor(sbdlabels).to(self.device)
             sbdlogits = sbdlogits.permute(0,2,1)
@@ -1349,6 +1377,9 @@ class Tagger():
 
             lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())), lemmalabels.view(-1))
 
+            if self.mtlmodel.edit == True:
+                edittypes = torch.flatten(torch.LongTensor(edittypes)).to(self.device)
+                editclfloss = self.editclfloss(editlogits,edittypes)
 
             """
             l2_reg = None
@@ -1379,7 +1410,10 @@ class Tagger():
             """
 
             #mtlloss = posloss + sbdloss + featsloss + lemmaloss + l2_reg * weightdecay # 'soft' l2 regularization
-            mtlloss = posloss + sbdloss + featsloss + lemmaloss
+            if self.mtlmodel.edit == True:
+                mtlloss = posloss + sbdloss + featsloss + lemmaloss + editclfloss
+            else:
+                mtlloss = posloss + sbdloss + featsloss + lemmaloss
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -1405,7 +1439,6 @@ class Tagger():
                     totalsbddevloss = 0
                     totalposdevloss = 0
                     totalfeatsdevloss = 0
-                    #totallemmaloss = 0
 
                     allsbdpreds = []
                     allsbdgold = []
@@ -1415,6 +1448,7 @@ class Tagger():
                     allfeatspreds = []
                     alllemmagold = []
                     alllemmapreds = []
+                    alleditpreds = []
 
                     # because of shingling for SBD, the dev data needs to be split in slices for inference, as GPU may run out of memory with shingles on the full token list.
                     # shingling and SBD prediction is done on the individual slice, as well as POS tag predictions and feats.
@@ -1435,7 +1469,7 @@ class Tagger():
 
 
                         # Run through the model and get the labels and logits (and preds for stepwise models)
-                        sbdlogits, sbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits, featslabels, lemmalogits, lemmalabels, lemmapreds = self.mtlmodel(slice,mode='dev')
+                        sbdlogits, sbdlabels, sbdpreds, poslogits, poslabels, pospreds, featslogits, featslabels, lemmalogits, lemmalabels, lemmapreds, editlogits, _ = self.mtlmodel(slice,mode='dev')
 
                         # get the feats predictions
                         featspreds = self.mtlmodel.sigmoid(featslogits)
@@ -1463,6 +1497,11 @@ class Tagger():
 
                         lemmapreds = [[l for l in lemma if l > 5] for lemma in lemmapreds ] # get rid of the special characters
                         lemmapreds = [''.join([self.mtlmodel.idxtochar[l] for l in lemma]) if len(lemma) > 0 else '_' for lemma in lemmapreds]
+
+                        if self.mtlmodel.edit == True:
+                            editpreds = torch.argmax(editlogits,dim=1).tolist()
+                        else:
+                            editpreds = []
 
                         # add up the losses across the slices for the avg
                         totalsbddevloss += sbddevloss
@@ -1494,11 +1533,28 @@ class Tagger():
                         allfeatspreds.extend(featsslicepreds)
                         alllemmagold.extend(goldlemmalabels)
                         alllemmapreds.extend(lemmapreds)
+                        alleditpreds.extend(editpreds)
 
                     #print ('inference time')
                     #print (time() - start)
                     if self.mtlmodel.sequence_length != old_seqlen:
                         self.mtlmodel.sequence_length = old_seqlen
+
+                    """
+                    post-process lemmas for edits
+                    """
+                    if self.mtlmodel.edit:
+                        postprocessedlemmas = []
+                        forms = [s.split('\t')[0].strip()  for slice in devdata for s in slice]
+                        for word, pred, edit in zip(forms,alllemmapreds,alleditpreds):
+                            if edit == 0:
+                                postprocessedlemmas.append(pred)
+                            else:
+                                postprocessedlemmas.append(word)
+                    else:
+                        postprocessedlemmas = alllemmapreds
+
+
 
                     # Now get the scores
                     goldspans = []
@@ -1522,13 +1578,15 @@ class Tagger():
                     correctfeats = sum([1 if p == g else 0 for p,g in zip(allfeatspreds,allfeatsgold)])
                     featsscores = Score(len(allfeatsgold),len(allfeatspreds),correctfeats,len(allfeatspreds))
 
-                    correctlemma = sum([1 if p == g else 0 for p,g in zip(alllemmapreds,alllemmagold)])
-                    lemmascores = Score(len(alllemmagold),len(alllemmapreds),correctlemma,len(alllemmapreds))
+                    correctlemma = sum([1 if p == g else 0 for p,g in zip(postprocessedlemmas,alllemmagold)])
+                    lemmascores = Score(len(alllemmagold),len(postprocessedlemmas),correctlemma,len(postprocessedlemmas))
 
+                    """
                     # write the errors:
                     with open ('lemmaerrors.csv','w') as lo:
                         for p,g,pos in zip(alllemmapreds,alllemmagold,allposgold):
                             lo.write(p + '\t' + g + '\t' + self.mtlmodel.postagsetcrf.get_item_for_index(pos) + '\t' + str(int(p == g)) + '\n')
+                    """
 
 
                     # Write the scores and losses to tensorboard and console
@@ -1671,13 +1729,14 @@ class Tagger():
             allpospreds = []
             allfeatspreds = []
             alllemmapreds = []
+            alleditspreds = []
 
             for slice in slices:
 
                 if len(slice[0]) != self.mtlmodel.sequence_length:  # this will happen in one case, for the last slice in the batch
                     self.mtlmodel.sequence_length = len(slice[0])
 
-                _, _, sbdpreds, _,_,pospreds, featslogits,_,_,_,lemmahypothesis = self.mtlmodel(slice, mode='test')
+                _, _, sbdpreds, _,_,pospreds, featslogits,_,_,_,lemmahypothesis,editlogits,_ = self.mtlmodel(slice, mode='test')
 
                 # get the feats predictions
                 featspreds = self.mtlmodel.sigmoid(featslogits)
@@ -1705,19 +1764,37 @@ class Tagger():
                 lemmapreds = [''.join([self.mtlmodel.idxtochar[l] for l in lemma]) if len(lemma) > 0 else '_' for lemma
                               in lemmapreds]
 
+                if self.mtlmodel.edit == True:
+                    editpreds = torch.argmax(editlogits, dim=1).tolist()
+                else:
+                    editpreds = []
+
                 allsbdpreds.extend(sbdpreds)
                 allpospreds.extend(pospreds)
                 allfeatspreds.extend(featsslicepreds)
                 allwords.extend([s.split('\t')[0].strip() for s in slice[0]])
                 alllemmapreds.extend(lemmapreds)
+                alleditspreds.extend(editpreds)
 
         allpospreds = [self.mtlmodel.postagsetcrf.get_item_for_index(p) for p in allpospreds]
+
+        if self.mtlmodel.edit:
+            postprocessedlemmas = []
+
+            for word, pred, edit in zip(toks, alllemmapreds, alleditspreds):
+                if edit == 0:
+                    postprocessedlemmas.append(pred)
+                else:
+                    postprocessedlemmas.append(word)
+        else:
+            postprocessedlemmas = alllemmapreds
+
 
 
         if sent_tag != 'auto':
             allsbdpreds = taggedsbdpreds
 
-        return allsbdpreds,allpospreds, allfeatspreds, allwords, alllemmapreds
+        return allsbdpreds,allpospreds, allfeatspreds, allwords, postprocessedlemmas
 
     def prepare_data_files(self,lemmadict= '../data/char_vocab.txt'):
         """
@@ -2076,7 +2153,7 @@ class Tagger():
 def main(): # testing only
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--seqlen', type=int, default=64)
     parser.add_argument('--trainbatch', type=int, default=16)
     parser.add_argument('--datatype', type=str, default='htb')
