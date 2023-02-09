@@ -1110,8 +1110,8 @@ class MTLModel(nn.Module):
 
 
         sampledembeddings = torch.cat((sampledembeddings, pospredsonehot), dim=2)
-        #morphembeddings = self.dropout(sampledembeddings)
-        morphembeddings = self.worddropout(sampledembeddings)
+        morphembeddings = self.dropout(sampledembeddings)
+        morphembeddings = self.worddropout(morphembeddings)
         morphembeddings = self.lockeddropout(morphembeddings)
         #morphembeddings = self.morphembedding2nn(morphembeddings)
 
@@ -1137,7 +1137,10 @@ class MTLModel(nn.Module):
             sbdpreds = None
             pospreds = None
 
-        lemmafeats,_ = self.lemmawordencoder(sampledembeddings)
+        lemmaembeddings = self.dropout(sampledembeddings)
+        lemmaembeddings = self.worddropout(lemmaembeddings)
+        lemmaembeddings = self.lockeddropout(lemmaembeddings)
+        lemmafeats,_ = self.lemmawordencoder(lemmaembeddings)
 
         if mode == 'train':
 
