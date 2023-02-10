@@ -1266,7 +1266,7 @@ class Tagger():
         self.featsloss = nn.BCEWithLogitsLoss()
         self.featsloss.to(self.device)
 
-        if self.edit:
+        if self.mtlmodel.edit:
             self.editclfloss = nn.CrossEntropyLoss().to(self.device)
 
         weight = torch.ones(len(self.mtlmodel.chartoidx.keys()))
@@ -1332,7 +1332,7 @@ class Tagger():
 
             return dataset
 
-        epochs = 7500
+        epochs = 15000
         bestf1 = float('-inf')
 
         trainingdata = read_file()
@@ -2153,7 +2153,7 @@ class Tagger():
 def main(): # testing only
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seqlen', type=int, default=64)
     parser.add_argument('--trainbatch', type=int, default=16)
     parser.add_argument('--datatype', type=str, default='htb')
