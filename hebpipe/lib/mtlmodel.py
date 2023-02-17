@@ -1378,7 +1378,7 @@ class Tagger():
             """
 
             #mtlloss = posloss + sbdloss + featsloss + lemmaloss + l2_reg * weightdecay # 'soft' l2 regularization
-            mtlloss = posloss + sbdloss + featsloss + lemmaloss
+            mtlloss = 0.0005 * posloss + sbdloss + featsloss + lemmaloss
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
