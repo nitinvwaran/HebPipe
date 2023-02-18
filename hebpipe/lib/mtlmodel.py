@@ -455,6 +455,8 @@ class MTLModel(nn.Module):
         self.stride_size = 10
         self.sigmoid = nn.Sigmoid()
 
+        self.beam = 7
+
     def shingle(self,toks,labels=None):
         """
         Returns the span embeddings, labelspans, and 'final mapping'
@@ -1026,17 +1028,17 @@ class MTLModel(nn.Module):
 
             # (2) set up beam
             with torch.no_grad():
-                h_in = h_in.data.repeat(5, 1, 1)  # repeat data for beam search # TODO: parameterize beam_size
-                src_mask = srcmask.repeat(5, 1)
+                h_in = h_in.data.repeat(self.beam, 1, 1)  # repeat data for beam search # TODO: parameterize beam_size
+                src_mask = srcmask.repeat(self.beam, 1)
 
                 lemmahn = torch.reshape(hn, (avgembeddings.size(dim=0), -1, hn.size(dim=1)))
                 # repeat the character level word embedding
                 sampledembeddings = torch.cat((avgembeddings, lemmahn),dim=2)  # char embeddings + averaged word embeddings
 
                 # repeat decoder hidden states
-                hn = hn.data.repeat(5, 1)
-                cn = cn.data.repeat(5, 1)
-            beam = [Beam(5, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
+                hn = hn.data.repeat(self.beam, 1)
+                cn = cn.data.repeat(self.beam, 1)
+            beam = [Beam(self.beam, True) for _ in range(batch_size)] # TODO: parameterize use_cuda 'True'
 
         # Add the SBD predictions to the POS Encoder Input!
         #posembeddings = torch.cat((sampledembeddings,sbdpreds,supertokenlabels),dim=2)
@@ -1117,12 +1119,12 @@ class MTLModel(nn.Module):
                 # repeat the character level word embedding
                 lemmahnrep = torch.reshape(feats, (-1, feats.size(dim=2)))
                 lemmahnrep = lemmahnrep.unsqueeze(1).repeat(1, dec_inputs.size(dim=1), 1)
-                lemmahnrep = lemmahnrep.data.repeat(5, 1, 1)
+                lemmahnrep = lemmahnrep.data.repeat(self.beam, 1, 1)
 
                 dec_inputs = torch.cat((dec_inputs, lemmahnrep), dim=2)
 
                 lemmalogits, (hn, cn) = self.lemmadecode(dec_inputs, hn, cn, h_in, src_mask, src=srcarr)
-                lemmalogits = lemmalogits.view(5, batch_size, -1).transpose(0, 1) \
+                lemmalogits = lemmalogits.view(self.beam, batch_size, -1).transpose(0, 1) \
                     .contiguous()  # [batch, beam, V]
 
                 # advance each beam
@@ -1132,7 +1134,7 @@ class MTLModel(nn.Module):
                     if is_done:
                         done += [b]
                     # update beam state
-                    self.update_state((hn, cn), b, beam[b].get_current_origin(), 5)
+                    self.update_state((hn, cn), b, beam[b].get_current_origin(), self.beam)
 
                 if len(done) == batch_size:
                     break
