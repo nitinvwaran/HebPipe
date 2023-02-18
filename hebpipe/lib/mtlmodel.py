@@ -1275,7 +1275,7 @@ class Tagger():
 
             return dataset
 
-        epochs = 15000
+        epochs = 20000
 
 
         trainingdata = read_file()
@@ -1320,7 +1320,7 @@ class Tagger():
 
             lemmaloss = self.lemmaloss(lemmalogits.view(-1, len(self.mtlmodel.chartoidx.keys())), lemmalabels.view(-1))
 
-            mtlloss = posloss + sbdloss + featsloss + lemmaloss # TODO: learnable weights?
+            mtlloss = 0.00025 * posloss + sbdloss + featsloss + lemmaloss # TODO: learnable weights?
             mtlloss.backward()
             self.optimizer.step()
             self.scheduler.step()
